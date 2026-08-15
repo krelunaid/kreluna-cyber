@@ -710,7 +710,7 @@ function MetricCard({
   eyebrow: string;
   value: string;
   note: string;
-  tone?: "blue" | "green" | "violet";
+  tone?: "blue" | "green" | "violet" | "amber" | "red";
 }) {
   return (
     <article className={`metric-card metric-${tone}`}>
@@ -1283,48 +1283,6 @@ export default function Home() {
         <strong>NO OFFENSIVE OR EXTERNAL ACTIONS</strong>
       </section>
 
-      <section className="metrics-grid" aria-label="Metriche principali">
-        <MetricCard
-          eyebrow="LAB SECURITY EVENTS"
-          value={state.metrics.detected.toLocaleString("en-US")}
-          note="sanitized synthetic events"
-        />
-        <MetricCard
-          eyebrow="ALLOWED SIMULATIONS"
-          value={state.metrics.mitigated.toLocaleString("en-US")}
-          note="policy-approved state updates"
-          tone="violet"
-        />
-        <MetricCard
-          eyebrow="REVIEW QUEUE"
-          value={String(state.metrics.pendingApprovals)}
-          note="human approvals pending"
-          tone="green"
-        />
-        <MetricCard
-          eyebrow="EVENT MEMORY"
-          value={
-            connection === "d1"
-              ? "DURABLE"
-              : connection === "memory_fallback"
-                ? "TEMP"
-                : connection === "connecting"
-                  ? "CHECK"
-                  : "ERROR"
-          }
-          note={
-            connection === "d1"
-              ? "saved to private event memory"
-              : connection === "memory_fallback"
-                ? "ephemeral failsafe, not persisted"
-                : connection === "connecting"
-                  ? "verifying event storage"
-                  : "API unavailable; no state applied"
-          }
-          tone="green"
-        />
-      </section>
-
       <section className="operations-grid">
         <aside className="surface-panel glass-panel">
           <div className="panel-heading">
@@ -1340,6 +1298,7 @@ export default function Home() {
                     ? "is-pending"
                     : ""
               }`}
+              role="status"
               aria-label={
                 connection === "unavailable"
                   ? "API della telemetria non disponibile"
@@ -1350,7 +1309,11 @@ export default function Home() {
             />
           </div>
 
-          <div className="radar-map" aria-label="Distribuzione sintetica degli eventi demo">
+          <div
+            className="radar-map"
+            role="img"
+            aria-label="Distribuzione sintetica degli eventi demo"
+          >
             <div className="radar-sweep" aria-hidden="true" />
             <div className="radar-axis radar-axis-x" aria-hidden="true" />
             <div className="radar-axis radar-axis-y" aria-hidden="true" />
@@ -1371,7 +1334,11 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="signal-bars" aria-label="Volume sintetico delle finestre demo">
+          <div
+            className="signal-bars"
+            role="img"
+            aria-label="Volume sintetico delle finestre demo"
+          >
             {[31, 56, 42, 78, 63, 91, 67, 84, 52, 73, 95, 62].map(
               (height, index) => (
                 <i
@@ -1518,6 +1485,54 @@ export default function Home() {
           </div>
         </section>
 
+        <section className="metrics-grid" aria-label="Metriche principali">
+          <MetricCard
+            eyebrow="LAB SECURITY EVENTS"
+            value={state.metrics.detected.toLocaleString("en-US")}
+            note="sanitized synthetic events"
+          />
+          <MetricCard
+            eyebrow="ALLOWED SIMULATIONS"
+            value={state.metrics.mitigated.toLocaleString("en-US")}
+            note="policy-approved state updates"
+            tone="violet"
+          />
+          <MetricCard
+            eyebrow="REVIEW QUEUE"
+            value={String(state.metrics.pendingApprovals)}
+            note="human approvals pending"
+            tone={state.metrics.pendingApprovals > 0 ? "amber" : "green"}
+          />
+          <MetricCard
+            eyebrow="EVENT MEMORY"
+            value={
+              connection === "d1"
+                ? "DURABLE"
+                : connection === "memory_fallback"
+                  ? "TEMP"
+                  : connection === "connecting"
+                    ? "CHECK"
+                    : "ERROR"
+            }
+            note={
+              connection === "d1"
+                ? "saved to private event memory"
+                : connection === "memory_fallback"
+                  ? "ephemeral failsafe, not persisted"
+                  : connection === "connecting"
+                    ? "verifying event storage"
+                    : "API unavailable; no state applied"
+            }
+            tone={
+              connection === "d1"
+                ? "green"
+                : connection === "unavailable"
+                  ? "red"
+                  : "amber"
+            }
+          />
+        </section>
+
         <aside className="agents-panel glass-panel">
           <div className="panel-heading">
             <div>
@@ -1623,7 +1638,11 @@ export default function Home() {
               </div>
             </dl>
 
-            <div className="vote-tally" aria-label="Distribuzione dei voti">
+            <div
+              className="vote-tally"
+              role="group"
+              aria-label="Distribuzione dei voti"
+            >
               <span>
                 ALLOW <strong>{council?.votes?.allowSimulation ?? 0}</strong>
               </span>
@@ -1780,7 +1799,11 @@ export default function Home() {
           ))}
         </div>
 
-        <section className="approval-console" aria-labelledby="approval-title">
+        <section
+          className="approval-console"
+          aria-labelledby="approval-title"
+          aria-busy={approvalBusy !== null}
+        >
           <div className="approval-console-heading">
             <div>
               <span>HUMAN APPROVAL QUEUE</span>
@@ -1921,18 +1944,30 @@ export default function Home() {
           <div className="panel-heading">
             <div>
               <span>05 / VERIFIED STREAM</span>
-              <h2>
+              <h2 id="timeline-title">
                 {connection === "unavailable"
                   ? "LAST KNOWN EVENT TIMELINE"
-                  : "LIVE EVENT TIMELINE"}
+                  : connection === "connecting"
+                    ? "VERIFYING EVENT TIMELINE"
+                    : "LIVE EVENT TIMELINE"}
               </h2>
             </div>
             <span className="feed-state">
-              {connection === "unavailable" ? "STALE / SANITIZED" : "SANITIZED"}
+              {connection === "unavailable"
+                ? "STALE / SANITIZED"
+                : connection === "connecting"
+                  ? "VERIFYING"
+                  : "SANITIZED"}
             </span>
           </div>
 
-          <div className="timeline-list" aria-live="polite">
+          <div
+            className="timeline-list"
+            role="log"
+            aria-labelledby="timeline-title"
+            aria-live="polite"
+            aria-relevant="additions"
+          >
             {state.timeline.map((event) => (
               <article key={event.id} className={`event event-${event.severity}`}>
                 <time>{event.time}</time>
