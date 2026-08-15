@@ -1,0 +1,517 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "17675eb7-5905-449b-9e24-30a9e03a7528",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "tables": {
+    "agent_assessments": {
+      "name": "agent_assessments",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_id": {
+          "name": "event_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "verdict": {
+          "name": "verdict",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "score_bps": {
+          "name": "score_bps",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rationale": {
+          "name": "rationale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "agent_assessments_event_agent_uq": {
+          "name": "agent_assessments_event_agent_uq",
+          "columns": [
+            "event_id",
+            "agent_id"
+          ],
+          "isUnique": true
+        },
+        "agent_assessments_event_idx": {
+          "name": "agent_assessments_event_idx",
+          "columns": [
+            "event_id"
+          ],
+          "isUnique": false
+        },
+        "agent_assessments_agent_idx": {
+          "name": "agent_assessments_agent_idx",
+          "columns": [
+            "agent_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "agent_assessments_event_id_security_events_id_fk": {
+          "name": "agent_assessments_event_id_security_events_id_fk",
+          "tableFrom": "agent_assessments",
+          "tableTo": "security_events",
+          "columnsFrom": [
+            "event_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "agent_assessments_score_range": {
+          "name": "agent_assessments_score_range",
+          "value": "\"agent_assessments\".\"score_bps\" BETWEEN 0 AND 10000"
+        },
+        "agent_assessments_rationale_length": {
+          "name": "agent_assessments_rationale_length",
+          "value": "length(\"agent_assessments\".\"rationale\") BETWEEN 1 AND 220"
+        }
+      }
+    },
+    "audit_log": {
+      "name": "audit_log",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_id": {
+          "name": "event_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sequence": {
+          "name": "sequence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "actor": {
+          "name": "actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "action": {
+          "name": "action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reason_code": {
+          "name": "reason_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "audit_log_event_sequence_uq": {
+          "name": "audit_log_event_sequence_uq",
+          "columns": [
+            "event_id",
+            "sequence"
+          ],
+          "isUnique": true
+        },
+        "audit_log_created_at_idx": {
+          "name": "audit_log_created_at_idx",
+          "columns": [
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "audit_log_outcome_idx": {
+          "name": "audit_log_outcome_idx",
+          "columns": [
+            "outcome"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "audit_log_event_id_security_events_id_fk": {
+          "name": "audit_log_event_id_security_events_id_fk",
+          "tableFrom": "audit_log",
+          "tableTo": "security_events",
+          "columnsFrom": [
+            "event_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "audit_log_sequence_positive": {
+          "name": "audit_log_sequence_positive",
+          "value": "\"audit_log\".\"sequence\" > 0"
+        },
+        "audit_log_detail_length": {
+          "name": "audit_log_detail_length",
+          "value": "length(\"audit_log\".\"detail\") BETWEEN 1 AND 280"
+        }
+      }
+    },
+    "incidents": {
+      "name": "incidents",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_id": {
+          "name": "event_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "impact": {
+          "name": "impact",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "approval_status": {
+          "name": "approval_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "public_summary": {
+          "name": "public_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "opened_at": {
+          "name": "opened_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "incidents_event_uq": {
+          "name": "incidents_event_uq",
+          "columns": [
+            "event_id"
+          ],
+          "isUnique": true
+        },
+        "incidents_status_idx": {
+          "name": "incidents_status_idx",
+          "columns": [
+            "status"
+          ],
+          "isUnique": false
+        },
+        "incidents_opened_at_idx": {
+          "name": "incidents_opened_at_idx",
+          "columns": [
+            "opened_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "incidents_event_id_security_events_id_fk": {
+          "name": "incidents_event_id_security_events_id_fk",
+          "tableFrom": "incidents",
+          "tableTo": "security_events",
+          "columnsFrom": [
+            "event_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "incidents_summary_length": {
+          "name": "incidents_summary_length",
+          "value": "length(\"incidents\".\"public_summary\") BETWEEN 1 AND 280"
+        }
+      }
+    },
+    "security_events": {
+      "name": "security_events",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sequence": {
+          "name": "sequence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scenario_id": {
+          "name": "scenario_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "public_summary": {
+          "name": "public_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "severity": {
+          "name": "severity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "confidence_bps": {
+          "name": "confidence_bps",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "signal_count": {
+          "name": "signal_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "requested_action": {
+          "name": "requested_action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_synthetic": {
+          "name": "is_synthetic",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "security_events_sequence_idx": {
+          "name": "security_events_sequence_idx",
+          "columns": [
+            "sequence"
+          ],
+          "isUnique": false
+        },
+        "security_events_occurred_at_idx": {
+          "name": "security_events_occurred_at_idx",
+          "columns": [
+            "occurred_at"
+          ],
+          "isUnique": false
+        },
+        "security_events_scenario_idx": {
+          "name": "security_events_scenario_idx",
+          "columns": [
+            "scenario_id"
+          ],
+          "isUnique": false
+        },
+        "security_events_decision_idx": {
+          "name": "security_events_decision_idx",
+          "columns": [
+            "decision"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "security_events_confidence_range": {
+          "name": "security_events_confidence_range",
+          "value": "\"security_events\".\"confidence_bps\" BETWEEN 0 AND 10000"
+        },
+        "security_events_signal_count_positive": {
+          "name": "security_events_signal_count_positive",
+          "value": "\"security_events\".\"signal_count\" > 0"
+        },
+        "security_events_synthetic_only": {
+          "name": "security_events_synthetic_only",
+          "value": "\"security_events\".\"is_synthetic\" = 1"
+        },
+        "security_events_title_length": {
+          "name": "security_events_title_length",
+          "value": "length(\"security_events\".\"title\") BETWEEN 1 AND 120"
+        },
+        "security_events_summary_length": {
+          "name": "security_events_summary_length",
+          "value": "length(\"security_events\".\"public_summary\") BETWEEN 1 AND 280"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}
