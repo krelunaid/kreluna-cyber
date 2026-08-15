@@ -1249,7 +1249,7 @@ export default function Home() {
             K
           </span>
           <div>
-            <p>KRELUNAA CYBER</p>
+            <p>KRELUNA CYBER</p>
             <h1>THE VAULT CHALLENGE</h1>
           </div>
         </div>
@@ -1396,7 +1396,7 @@ export default function Home() {
                 <div className="vault-door">
                   <div className="vault-door-groove" aria-hidden="true" />
                   <div className="vault-plaque">
-                    <small>KRELUNAA SECURE CORE</small>
+                    <small>KRELUNA SECURE CORE</small>
                     <strong>THE VAULT</strong>
                     <span>ISOLATED CHALLENGE SERVER</span>
                   </div>
@@ -2019,7 +2019,7 @@ export default function Home() {
           <span>•</span> NO SECRETS
         </p>
         <p>
-          KRELUNAA DEFENSE ENGINE · POLICY-BOUND / HYBRID-READY · SAFE LAB v0.3
+          KRELUNA DEFENSE ENGINE · POLICY-BOUND / HYBRID-READY · SAFE LAB v0.3
         </p>
       </footer>
     </main>

@@ -28,13 +28,13 @@ async function render() {
   );
 }
 
-test("server-renders the Krelunaa command center", async () => {
+test("server-renders the Kreluna command center", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /Krelunaa Cyber · The Vault Challenge/i);
+  assert.match(html, /Kreluna Cyber · The Vault Challenge/i);
   assert.match(html, /THE VAULT CHALLENGE/);
   assert.match(html, /AGENT COUNCIL/);
   assert.match(html, /SIMULATION MODE/);
