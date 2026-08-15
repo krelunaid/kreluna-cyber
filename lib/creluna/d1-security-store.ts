@@ -11,8 +11,14 @@ import {
   securityEvents,
 } from "../../db/schema.ts";
 import {
+  autopilotOutcomeFor,
+  buildCouncilSummary,
+  createAutopilotState,
   createInitialDemoState,
+  evaluateDemoAction,
+  GUARDED_AUTOPILOT_ALLOWLIST,
   resolveApprovalInState,
+  validateCouncilReports,
   type AgentId,
   type ApprovalDecision,
   type ApprovalResolutionResult,
@@ -38,6 +44,11 @@ const MAX_PUBLIC_AUDIT_ENTRIES = 100;
 // Bounded FIFO window: operators always see the oldest work first, so a busy
 // lab cannot indefinitely hide an earlier approval behind newer proposals.
 const MAX_PUBLIC_PENDING_APPROVALS = 50;
+const MIN_AUTOPILOT_COUNCIL_CONFIDENCE = 85;
+
+function decisionRank(outcome: PolicyOutcome): number {
+  return outcome === "deny" ? 2 : outcome === "requires_approval" ? 1 : 0;
+}
 
 function clockLabel(iso: string): string {
   return iso.match(/T(\d{2}:\d{2}:\d{2})/)?.[1] ?? "LAB";
@@ -71,8 +82,108 @@ export class D1SecurityStore implements SecurityStore {
   }
 
   async appendCycle(result: DefenseCycleResult, replay?: IdempotencyRecordInput): Promise<void> {
-    if (result.assessments.length !== 5 || result.council.quorum.received !== 5) {
+    if (
+      result.assessments.length !== 5 ||
+      result.council.quorum.received !== 5 ||
+      result.council.quorum.required !== 5 ||
+      !result.council.quorum.met
+    ) {
       throw new Error("A complete validated five-agent council is required.");
+    }
+    const validatedReports = validateCouncilReports(
+      result.event,
+      result.assessments,
+    );
+    if (new Set(validatedReports.map(({ provider }) => provider)).size !== 1) {
+      throw new Error("Council reports must come from one declared advisory boundary.");
+    }
+    const immutablePolicyDecision = evaluateDemoAction(result.event);
+    const rebuiltCouncil = buildCouncilSummary(
+      result.event,
+      immutablePolicyDecision,
+      validatedReports,
+    );
+    if (JSON.stringify(rebuiltCouncil) !== JSON.stringify(result.council)) {
+      throw new Error("The persisted council summary must match validated reports and Policy Guard.");
+    }
+    let expectedOutcome = immutablePolicyDecision.outcome;
+    let expectedReasonCode = immutablePolicyDecision.reasonCode;
+    let expectedApprovalRequired = immutablePolicyDecision.approvalRequired;
+    if (immutablePolicyDecision.outcome === "allow_simulation") {
+      const confidenceGateMet = validatedReports.every(
+        ({ confidence }) => confidence >= MIN_AUTOPILOT_COUNCIL_CONFIDENCE,
+      );
+      expectedOutcome = confidenceGateMet && rebuiltCouncil.recommendation === "allow_simulation"
+        ? "allow_simulation"
+        : "deny";
+      if (!confidenceGateMet) {
+        expectedReasonCode = "COUNCIL_CONFIDENCE_GATE_FAILED";
+      } else if (rebuiltCouncil.recommendation === "deny") {
+        expectedReasonCode = "COUNCIL_DENY_RECORDED";
+      } else if (rebuiltCouncil.recommendation === "requires_approval") {
+        expectedReasonCode = "COUNCIL_SAFETY_HOLD_RECORDED";
+      }
+      expectedApprovalRequired = false;
+    } else if (
+      decisionRank(rebuiltCouncil.recommendation) >
+      decisionRank(immutablePolicyDecision.outcome)
+    ) {
+      expectedOutcome = rebuiltCouncil.recommendation;
+      expectedReasonCode = "COUNCIL_DENY_RECORDED";
+      expectedApprovalRequired = false;
+    }
+    if (
+      result.decision.outcome !== expectedOutcome ||
+      result.decision.reasonCode !== expectedReasonCode ||
+      result.decision.approvalRequired !== expectedApprovalRequired
+    ) {
+      throw new Error("The persisted decision cannot weaken Policy Guard or guarded-autopilot gates.");
+    }
+    if (
+      result.execution.externalNetworkAction !== false ||
+      result.execution.offensiveAction !== false ||
+      result.execution.privilegedAction !== false
+    ) {
+      throw new Error("External, offensive and privileged execution is forbidden.");
+    }
+    const isAutopilotAction = (GUARDED_AUTOPILOT_ALLOWLIST as readonly string[])
+      .includes(result.event.requestedAction);
+    if (
+      result.decision.outcome === "allow_simulation" &&
+      !isAutopilotAction
+    ) {
+      throw new Error("Only guarded-autopilot allowlisted actions may be recorded as autonomous.");
+    }
+    if (
+      result.approval !== null &&
+      result.event.requestedAction !== "restore_demo_snapshot"
+    ) {
+      throw new Error("Only manual snapshot restoration may create a blocking approval.");
+    }
+    if (
+      result.event.requestedAction === "restore_demo_snapshot" &&
+      (
+        result.decision.outcome === "allow_simulation" ||
+        (result.decision.outcome === "requires_approval" && result.approval === null) ||
+        (result.decision.outcome === "deny" && result.approval !== null)
+      )
+    ) {
+      throw new Error("Snapshot restoration must remain behind a recorded manual approval gate.");
+    }
+    if (
+      result.event.requestedAction !== "restore_demo_snapshot" &&
+      result.decision.outcome === "requires_approval"
+    ) {
+      throw new Error("Guarded-autopilot actions cannot create a new blocking approval.");
+    }
+    if (
+      result.audit.eventId !== result.event.id ||
+      result.audit.action !== result.event.requestedAction ||
+      result.audit.outcome !== result.decision.outcome ||
+      result.audit.reasonCode !== result.decision.reasonCode ||
+      result.incident.eventId !== result.event.id
+    ) {
+      throw new Error("Cycle audit and incident records must match the effective decision.");
     }
     if (replay) {
       const existing = await this.findReplay(replay.id);
@@ -219,6 +330,9 @@ export class D1SecurityStore implements SecurityStore {
         createdAt: request.createdAt,
         councilRecommendation: request.councilRecommendation,
         explanation: request.explanation,
+        reviewMode: request.requestedAction === "restore_demo_snapshot"
+          ? "blocking_manual"
+          : "post_event",
       }, ...before.pendingApprovalItems];
     }
     const result = resolveApprovalInState(before, approvalId, decision, now);
@@ -380,6 +494,13 @@ export class D1SecurityStore implements SecurityStore {
       .select({ value: count() })
       .from(approvalRequests)
       .where(eq(approvalRequests.status, "pending"));
+    const [blockingManualCountRow] = await this.db
+      .select({ value: count() })
+      .from(approvalRequests)
+      .where(and(
+        eq(approvalRequests.status, "pending"),
+        eq(approvalRequests.requestedAction, "restore_demo_snapshot"),
+      ));
 
     const latestByAgent = new Map<AgentId, (typeof latestCouncilAssessments)[number]>();
     for (const assessment of latestCouncilAssessments) {
@@ -414,7 +535,35 @@ export class D1SecurityStore implements SecurityStore {
     const eventCount = Number(eventCountRow?.value ?? 0);
     const approvedSimulationCount = Number(allowedCountRow?.value ?? 0) + Number(approvedCountRow?.value ?? 0);
     const pendingApprovalCount = Number(pendingCountRow?.value ?? 0);
+    const blockingManualApprovalCount = Number(blockingManualCountRow?.value ?? 0);
     const latestEvent = recentEvents[0];
+    const pendingApprovalItems = pendingRows.map((item) => {
+      const reviewMode = item.requestedAction === "restore_demo_snapshot"
+        ? "blocking_manual" as const
+        : "post_event" as const;
+      return {
+        id: item.id,
+        eventId: item.eventId,
+        scenarioId: item.scenarioId,
+        title: item.title,
+        severity: item.severity,
+        requestedAction: item.requestedAction,
+        status: "pending" as const,
+        policyVersion: item.policyVersion,
+        createdAt: item.createdAt,
+        councilRecommendation: item.councilRecommendation,
+        explanation: reviewMode === "post_event"
+          ? "Legacy proposal retained for post-event review; guarded protection remains active."
+          : "Snapshot restoration remains blocked until one explicit human decision is recorded.",
+        reviewMode,
+      };
+    });
+    const latestCouncilLegacyPostReview = latestCouncil
+      ? pendingRows.some((item) =>
+          item.eventId === latestCouncil.eventId &&
+          item.requestedAction !== "restore_demo_snapshot"
+        )
+      : false;
     const decisionTimeline = decisionRows.map((record) => {
       const severity: Severity = record.decision === "approve_simulation" ? "low" : "info";
       return {
@@ -434,7 +583,9 @@ export class D1SecurityStore implements SecurityStore {
       sortAt: event.occurredAt,
       title: event.title,
       detail: event.decision === "requires_approval"
-        ? `${event.publicSummary} · blocked for human approval`
+        ? event.requestedAction === "restore_demo_snapshot"
+          ? `${event.publicSummary} · manual restore approval required`
+          : `${event.publicSummary} · legacy post-event review · guarded protection active`
         : event.publicSummary,
       severity: event.severity,
     }));
@@ -442,7 +593,7 @@ export class D1SecurityStore implements SecurityStore {
     return {
       ...base,
       revision: eventCount + Number(decisionCountRow?.value ?? 0),
-      status: pendingApprovalCount > 0
+      status: blockingManualApprovalCount > 0
         ? "review"
         : latestEvent?.decision === "deny" ? "attention" : "protected",
       metrics: {
@@ -450,6 +601,23 @@ export class D1SecurityStore implements SecurityStore {
         mitigated: approvedSimulationCount,
         pendingApprovals: pendingApprovalCount,
         criticalBreaches: 0,
+      },
+      autopilot: {
+        ...createAutopilotState(latestEvent
+          ? {
+              outcome: autopilotOutcomeFor(
+                latestEvent.requestedAction,
+                latestEvent.decision,
+              ),
+              cycleId: latestEvent.id,
+              scenario: latestEvent.scenarioId,
+              action: latestEvent.requestedAction,
+              decidedAt: latestEvent.occurredAt,
+            }
+          : null, pendingApprovalItems),
+        // The public queue is intentionally bounded, so derive this flag from
+        // the unbounded count rather than only the first visible 50 records.
+        postReviewOnly: blockingManualApprovalCount === 0,
       },
       council,
       agents: base.agents.map((agent) => {
@@ -467,7 +635,7 @@ export class D1SecurityStore implements SecurityStore {
         };
         return {
           ...agent,
-          status: latestCouncilResolution
+          status: latestCouncilResolution || latestCouncilLegacyPostReview
             ? "ready"
             : assessment.verdict === "contain_simulation" || assessment.verdict === "hold_for_human"
               ? "engaged"
@@ -476,6 +644,8 @@ export class D1SecurityStore implements SecurityStore {
             ? latestCouncilResolution.decision === "approve_simulation"
               ? "Human state-only authorization recorded; no external action executed"
               : "Human rejection recorded; no action executed"
+            : latestCouncilLegacyPostReview
+              ? "Legacy hold retained for post-event review; guarded autopilot remains active"
             : assessment.rationale,
           stats: {
             assessments: countsByAgent.get(agent.id) ?? 0,
@@ -485,19 +655,7 @@ export class D1SecurityStore implements SecurityStore {
           assessment,
         };
       }),
-      pendingApprovalItems: pendingRows.map((item) => ({
-        id: item.id,
-        eventId: item.eventId,
-        scenarioId: item.scenarioId,
-        title: item.title,
-        severity: item.severity,
-        requestedAction: item.requestedAction,
-        status: "pending" as const,
-        policyVersion: item.policyVersion,
-        createdAt: item.createdAt,
-        councilRecommendation: item.councilRecommendation,
-        explanation: item.explanation,
-      })),
+      pendingApprovalItems,
       recentApprovalDecisions: decisionRows.map((record) => ({
         id: record.id,
         approvalId: record.approvalId,

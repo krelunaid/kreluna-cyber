@@ -50,8 +50,8 @@ const agentBriefs: Record<
   decoy: {
     phase: "DEVIA",
     description:
-      "Propone l'instradamento verso un'esca interna isolata, soltanto dopo l'autorizzazione prevista.",
-    boundary: "Honeypot interno · approvazione umana",
+      "Instrada verso un'esca interna isolata quando evidenze, quorum e allowlist soddisfano la policy.",
+    boundary: "Honeypot interno · routing reversibile",
   },
   phoenix: {
     phase: "RIPRISTINA",
@@ -159,6 +159,7 @@ interface PendingApprovalShape {
   createdAt?: string;
   councilRecommendation?: string;
   explanation?: string;
+  reviewMode?: "post_event" | "blocking_manual";
 }
 
 interface PolicyShape {
@@ -169,6 +170,37 @@ interface PolicyShape {
   externalNetworkActions?: boolean;
   offensiveActions?: boolean;
   humanApprovalForHighImpact?: boolean;
+  humanApprovalForRestore?: boolean;
+}
+
+type AutopilotOutcome =
+  | "auto-contained"
+  | "observed"
+  | "denied"
+  | "manual_review";
+
+interface AutopilotShape {
+  enabled: boolean;
+  mode: "guarded_autopilot";
+  availability: "event_driven";
+  lastCycle: {
+    outcome: AutopilotOutcome;
+    cycleId: string;
+    scenario: string;
+    action: string;
+    decidedAt: string;
+  } | null;
+  allowlist: string[];
+  hardLimits: {
+    stateOnly: true;
+    labOnly: true;
+    reversibleOnly: true;
+    externalActions: false;
+    offensiveActions: false;
+    privilegedActions: false;
+    networkExecution: false;
+  };
+  postReviewOnly: boolean;
 }
 
 interface ApprovalDecisionShape extends Record<string, unknown> {
@@ -186,13 +218,14 @@ type IntelligenceDashboard = DashboardState & {
   council?: CouncilShape | null;
   pendingApprovalItems?: PendingApprovalShape[];
   recentApprovalDecisions?: ApprovalDecisionShape[];
+  autopilot?: AutopilotShape;
 };
 
 const verdictLabels: Record<string, string> = {
   clear: "CLEAR",
   monitor: "MONITOR",
   contain_simulation: "CONTAIN LAB",
-  hold_for_human: "HUMAN HOLD",
+  hold_for_human: "SAFE HOLD",
   allow_simulation: "ALLOW LAB",
   requires_approval: "REVIEW",
   deny: "DENY",
@@ -200,8 +233,33 @@ const verdictLabels: Record<string, string> = {
 
 const voteLabels: Record<string, string> = {
   allow_simulation: "ALLOW",
-  requires_approval: "HOLD",
+  requires_approval: "REVIEW",
   deny: "DENY",
+};
+
+const autopilotAllowlist = [
+  "observe",
+  "rate_limit_demo_session",
+  "route_to_internal_decoy",
+  "quarantine_demo_asset",
+] as const;
+
+const failClosedAutopilot: AutopilotShape = {
+  enabled: false,
+  mode: "guarded_autopilot",
+  availability: "event_driven",
+  lastCycle: null,
+  allowlist: [],
+  hardLimits: {
+    stateOnly: true,
+    labOnly: true,
+    reversibleOnly: true,
+    externalActions: false,
+    offensiveActions: false,
+    privilegedActions: false,
+    networkExecution: false,
+  },
+  postReviewOnly: true,
 };
 
 const auditActions = [
@@ -225,6 +283,10 @@ const auditReasonCodes = [
   "OUTSIDE_LAB_BOUNDARY",
   "ACTION_NOT_ALLOWLISTED",
   "INVALID_EVIDENCE",
+  "COUNCIL_DENY_RECORDED",
+  "COUNCIL_SAFETY_HOLD_RECORDED",
+  "COUNCIL_CONFIDENCE_GATE_FAILED",
+  "COUNCIL_HUMAN_APPROVAL_REQUIRED",
 ] as const;
 
 function percentLabel(value: number) {
@@ -303,6 +365,80 @@ function sanitizePublicText(value: unknown, fallback: string, limit = 160) {
     .slice(0, limit) || fallback;
 }
 
+function sanitizeAutonomyText(
+  value: unknown,
+  fallback: string,
+  limit = 160,
+) {
+  const sanitized = sanitizePublicText(value, fallback, limit);
+  const describesBlockingForAPerson =
+    /(?:wait|await|pending|blocked|held|sospes|attend|fermat).{0,48}(?:human|operator|approval|operatore|approvazione)/i.test(
+      sanitized,
+    ) ||
+    /(?:human|operator|approval|operatore|approvazione).{0,48}(?:required|pending|wait|necessari|attesa)/i.test(
+      sanitized,
+    );
+
+  return describesBlockingForAPerson ? fallback : sanitized;
+}
+
+function normalizeAutopilot(value: unknown): AutopilotShape {
+  if (!isRecord(value)) return failClosedAutopilot;
+
+  const hardLimits = isRecord(value.hardLimits) ? value.hardLimits : {};
+  const safeLimits =
+    hardLimits.stateOnly === true &&
+    hardLimits.labOnly === true &&
+    hardLimits.reversibleOnly === true &&
+    hardLimits.externalActions === false &&
+    hardLimits.offensiveActions === false &&
+    hardLimits.privilegedActions === false &&
+    hardLimits.networkExecution === false;
+  const suppliedAllowlist = Array.isArray(value.allowlist)
+    ? value.allowlist.filter((item): item is string => typeof item === "string")
+    : [];
+  const suppliedAllowlistSet = new Set(suppliedAllowlist);
+  const allowlistIsSafe =
+    suppliedAllowlist.length === autopilotAllowlist.length &&
+    suppliedAllowlistSet.size === autopilotAllowlist.length &&
+    autopilotAllowlist.every((item) => suppliedAllowlistSet.has(item));
+  const modeIsSafe =
+    value.mode === "guarded_autopilot" &&
+    value.availability === "event_driven";
+  const enabled =
+    value.enabled === true && safeLimits && allowlistIsSafe && modeIsSafe;
+  const lastCycle = isRecord(value.lastCycle) ? value.lastCycle : null;
+  const outcome = lastCycle?.outcome;
+  const validOutcome =
+    outcome === "auto-contained" ||
+    outcome === "observed" ||
+    outcome === "denied" ||
+    outcome === "manual_review";
+
+  return {
+    enabled,
+    mode: "guarded_autopilot",
+    availability: "event_driven",
+    lastCycle:
+      enabled && lastCycle && validOutcome
+        ? {
+            outcome,
+            cycleId: sanitizePublicText(lastCycle.cycleId, "cycle-withheld", 100),
+            scenario: sanitizePublicText(lastCycle.scenario, "safe-lab", 48),
+            action: sanitizePublicText(lastCycle.action, "observe", 48),
+            decidedAt: sanitizePublicText(lastCycle.decidedAt, "—", 36),
+          }
+        : null,
+    allowlist: enabled
+      ? suppliedAllowlist.filter((item) =>
+          (autopilotAllowlist as readonly string[]).includes(item),
+        )
+      : [],
+    hardLimits: failClosedAutopilot.hardLimits,
+    postReviewOnly: value.postReviewOnly === true,
+  };
+}
+
 function normalizePolicy(
   value: unknown,
   fallback: PolicyShape | undefined,
@@ -332,7 +468,11 @@ function normalizePolicy(
     humanApprovalForHighImpact:
       typeof candidate.humanApprovalForHighImpact === "boolean"
         ? candidate.humanApprovalForHighImpact
-        : (fallback?.humanApprovalForHighImpact ?? true),
+        : (fallback?.humanApprovalForHighImpact ?? false),
+    humanApprovalForRestore:
+      typeof candidate.humanApprovalForRestore === "boolean"
+        ? candidate.humanApprovalForRestore
+        : (fallback?.humanApprovalForRestore ?? true),
   };
 }
 
@@ -366,7 +506,13 @@ function normalizeCouncil(value: unknown): CouncilShape | null {
       requiresApproval: count(votes.requiresApproval),
       deny: count(votes.deny),
     },
-    explanation: normalizeStringList(value.explanation, 5, 150),
+    explanation: normalizeStringList(value.explanation, 5, 150).map((item) =>
+      sanitizeAutonomyText(
+        item,
+        "Il Policy Guard mantiene il safe hold mentre l'autopilot continua a proteggere il laboratorio.",
+        150,
+      ),
+    ),
     dissentingAgents: normalizeStringList(value.dissentingAgents, 5, 34),
   };
 }
@@ -395,11 +541,16 @@ function normalizePendingApprovals(value: unknown): PendingApprovalShape[] {
         "requires_approval",
         48,
       ),
-      explanation: sanitizePublicText(
+      explanation: sanitizeAutonomyText(
         item.explanation,
-        "High-impact simulation awaits explicit human authorization.",
+        "Safe hold state-only registrato. L'autopilot resta attivo; questa revisione può essere completata in seguito.",
         180,
       ),
+      reviewMode:
+        item.reviewMode === "blocking_manual" ||
+        item.requestedAction === "restore_demo_snapshot"
+          ? "blocking_manual"
+          : "post_event",
     }));
 }
 
@@ -533,7 +684,12 @@ function normalizePublicSnapshot(
         fallback.metrics.pendingApprovals,
       ),
     },
-    agents: fallback.agents.map((agent) => {
+    agents: (Array.isArray(snapshot.agents)
+      ? fallback.agents.filter((agent) =>
+          incomingAgents.some((item) => item.id === agent.id),
+        )
+      : fallback.agents
+    ).map((agent) => {
       const incoming = incomingAgents.find((item) => item.id === agent.id);
       const fallbackAgent = agent as IntelligenceAgent;
       const incomingStats = isRecord(incoming?.stats) ? incoming.stats : {};
@@ -566,7 +722,7 @@ function normalizePublicSnapshot(
           incoming?.status === "engaged" || incoming?.status === "ready"
             ? incoming.status
             : agent.status,
-        lastAction: sanitizePublicText(
+        lastAction: sanitizeAutonomyText(
           incoming?.lastAction,
           agent.lastAction,
           110,
@@ -580,16 +736,9 @@ function normalizePublicSnapshot(
           fallbackAgent.mission ?? agent.role,
           110,
         ),
-        capabilities: (() => {
-          const capabilities = normalizeStringList(
-            incoming?.capabilities,
-            6,
-            48,
-          );
-          return capabilities.length > 0
-            ? capabilities
-            : (fallbackAgent.capabilities ?? []);
-        })(),
+        capabilities: Array.isArray(incoming?.capabilities)
+          ? normalizeStringList(incoming.capabilities, 6, 48)
+          : (fallbackAgent.capabilities ?? []),
         stats: {
           assessments:
             typeof incomingStats.assessments === "number" &&
@@ -612,9 +761,9 @@ function normalizePublicSnapshot(
               risk,
               confidence: safeScoreValue(incomingAssessment.confidence, 0),
               trust: safeScoreValue(incomingAssessment.trust, 0),
-              rationale: sanitizePublicText(
+              rationale: sanitizeAutonomyText(
                 incomingAssessment.rationale,
-                "Assessment rationale withheld",
+                "Safe hold applicato; l'autopilot continua entro i limiti della policy.",
                 170,
               ),
               evidence: normalizeStringList(
@@ -631,9 +780,8 @@ function normalizePublicSnapshot(
           : (fallbackAgent.assessment ?? null),
       } as AgentState;
     }),
-    timeline:
-      incomingTimeline.length > 0
-        ? incomingTimeline.slice(0, 4).map((event, index) => {
+    timeline: Array.isArray(snapshot.timeline)
+      ? incomingTimeline.slice(0, 4).map((event, index) => {
             const severity: Severity =
               event.severity === "info" ||
               event.severity === "low" ||
@@ -650,18 +798,17 @@ function normalizePublicSnapshot(
                 "Sanitized security event",
                 90,
               ),
-              detail: sanitizePublicText(
+              detail: sanitizeAutonomyText(
                 event.detail,
-                "Public detail withheld by policy",
+                "Safe hold registrato; la protezione autonoma resta attiva entro la policy.",
                 170,
               ),
               severity,
             };
           })
-        : fallback.timeline,
-    researchers:
-      incomingResearchers.length > 0
-        ? incomingResearchers.slice(0, 8).map((researcher, index) => ({
+      : fallback.timeline,
+    researchers: Array.isArray(snapshot.researchers)
+      ? incomingResearchers.slice(0, 8).map((researcher, index) => ({
             alias: sanitizePublicText(
               researcher.alias,
               `Researcher ${index + 1}`,
@@ -675,7 +822,7 @@ function normalizePublicSnapshot(
                 ? Math.floor(researcher.findings)
                 : 0,
           }))
-        : fallback.researchers,
+      : fallback.researchers,
     audit: Array.isArray(snapshot.audit)
       ? normalizeAudit(snapshot.audit)
       : fallback.audit,
@@ -689,6 +836,7 @@ function normalizePublicSnapshot(
       : normalizeApprovalDecisions(
           fallbackIntelligence.recentApprovalDecisions ?? [],
         ),
+    autopilot: normalizeAutopilot(snapshot.autopilot),
   } as DashboardState;
 }
 
@@ -730,7 +878,13 @@ function MetricCard({
   );
 }
 
-function AgentRow({ agent }: { agent: AgentState }) {
+function AgentRow({
+  agent,
+  verified,
+}: {
+  agent: AgentState;
+  verified: boolean;
+}) {
   const brief = agentBriefs[agent.id];
   const intelligence = agent as IntelligenceAgent;
   const assessment = intelligence.assessment;
@@ -746,7 +900,10 @@ function AgentRow({ agent }: { agent: AgentState }) {
   const risk = assessment?.risk ?? "none";
 
   return (
-    <article className={`agent-row agent-${agent.status}`}>
+    <article
+      className={`agent-row agent-${verified ? agent.status : "verifying"}`}
+      aria-label={`${agent.name}, ${verified ? agent.status : "in verifica"}`}
+    >
       <div className="agent-mark" aria-hidden="true">
         {agentIcons[agent.id]}
       </div>
@@ -758,7 +915,13 @@ function AgentRow({ agent }: { agent: AgentState }) {
               L{intelligence.level ?? 1}
             </small>
           </strong>
-          <span>{agent.status === "engaged" ? "ANALYZING" : "READY"}</span>
+          <span>
+            {verified
+              ? agent.status === "engaged"
+                ? "ANALYZING"
+                : "READY"
+              : "VERIFYING"}
+          </span>
         </div>
         <p>
           {brief.phase} · {agent.role}
@@ -773,33 +936,42 @@ function AgentRow({ agent }: { agent: AgentState }) {
               : verdictLabels[verdict] ?? verdict}
           </span>
           <span className={`risk-label risk-${risk}`}>RISK {risk.toUpperCase()}</span>
-          <span>TRUST {trust}%</span>
-          <span>CONF {confidence === null ? "—" : `${confidence}%`}</span>
+          <span>TRUST {verified ? `${trust}%` : "—"}</span>
+          <span>
+            CONF {verified && confidence !== null ? `${confidence}%` : "—"}
+          </span>
         </div>
         <div className="confidence-track" aria-hidden="true">
-          <i style={{ width: `${confidence ?? trust}%` }} />
+          <i style={{ width: verified ? `${confidence ?? trust}%` : "0%" }} />
         </div>
         <small className="agent-rationale">
-          {sanitizePublicText(
-            assessment?.rationale,
-            agent.lastAction,
-            135,
-          )}
+          {verified
+            ? sanitizeAutonomyText(
+                assessment?.rationale,
+                agent.lastAction,
+                135,
+              )
+            : "Verifica dello snapshot operativo in corso"}
         </small>
       </div>
     </article>
   );
 }
 
-function buildPipeline(state: DashboardState): PipelineStage[] {
+function buildPipeline(
+  state: DashboardState,
+  autopilot: AutopilotShape,
+): PipelineStage[] {
   const hasCycle = state.revision > 0;
-  const isWaiting = state.metrics.pendingApprovals > 0;
+  const lastOutcome = autopilot.lastCycle?.outcome;
+  const autoContained = lastOutcome === "auto-contained";
+  const safelyDenied = lastOutcome === "denied" || lastOutcome === "manual_review";
 
   return [
     {
       id: "detect",
       label: "RILEVA",
-      detail: hasCycle ? "Segnale acquisito" : "Sensori pronti",
+      detail: hasCycle ? "Evento acquisito" : "Ingresso eventi pronto",
       tone: hasCycle ? "complete" : "active",
     },
     {
@@ -816,23 +988,21 @@ function buildPipeline(state: DashboardState): PipelineStage[] {
     },
     {
       id: "approve",
-      label: "APPROVA",
-      detail: isWaiting
-        ? "Operatore richiesto"
-        : hasCycle
-          ? "Policy soddisfatta"
-          : "Guardrail pronto",
-      tone: isWaiting ? "active" : hasCycle ? "complete" : "waiting",
+      label: "APPLICA",
+      detail: autoContained
+        ? "Contenimento automatico"
+        : safelyDenied
+          ? "Safe hold applicato"
+          : hasCycle
+            ? "Policy applicata"
+            : "Guardrail pronto",
+      tone: hasCycle ? "complete" : "waiting",
     },
     {
       id: "audit",
-      label: "AUDIT",
-      detail: isWaiting
-        ? "Chiusura sospesa"
-        : hasCycle
-          ? "Traccia registrata"
-          : "Registro pronto",
-      tone: isWaiting ? "waiting" : hasCycle ? "complete" : "waiting",
+      label: "REVISIONA",
+      detail: hasCycle ? "Post-action, non bloccante" : "Registro pronto",
+      tone: hasCycle ? "complete" : "waiting",
     },
   ];
 }
@@ -850,8 +1020,11 @@ export default function Home() {
   );
   const stateRef = useRef(state);
   const mutationInFlightRef = useRef(false);
+  const hydrationInFlightRef = useRef(false);
+  const hydrationControllerRef = useRef<AbortController | null>(null);
   const scenarioIdempotencyKeysRef = useRef(new Map<string, string>());
   const [isLive, setIsLive] = useState(true);
+  const [hasVerifiedSnapshot, setHasVerifiedSnapshot] = useState(false);
   const [connection, setConnection] =
     useState<ConnectionState>("connecting");
   const [selectedScenario, setSelectedScenario] = useState<string>(
@@ -864,7 +1037,7 @@ export default function Home() {
     Record<string, ApprovalOperation>
   >({});
   const [operatorNotice, setOperatorNotice] = useState(
-    "Nessuna decisione manuale inviata.",
+    "Autopilot attivo: la revisione umana è post-azione e non blocca la protezione.",
   );
   const [secondsRemaining, setSecondsRemaining] = useState(
     3 * 24 * 60 * 60 + 14 * 60 * 60 + 22 * 60 + 8,
@@ -900,12 +1073,25 @@ export default function Home() {
     return true;
   }, []);
 
-  const hydrateFromApi = useCallback(async (signal?: AbortSignal) => {
+  const hydrateFromApi = useCallback(async () => {
+    if (hydrationInFlightRef.current) {
+      return { ok: false as const, snapshot: null };
+    }
+
+    hydrationInFlightRef.current = true;
+    const controller = new AbortController();
+    hydrationControllerRef.current = controller;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 4500);
+
     try {
       const response = await fetch("/api/security", {
         cache: "no-store",
         headers: { Accept: "application/json" },
-        signal,
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error("Public snapshot unavailable");
 
@@ -918,24 +1104,31 @@ export default function Home() {
 
       applySnapshot(normalized);
       setConnection(connectionFromPayload(payload));
+      setHasVerifiedSnapshot(true);
       return { ok: true as const, snapshot: stateRef.current };
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
+        if (timedOut) setConnection("unavailable");
         return { ok: false as const, snapshot: null };
       }
       setConnection("unavailable");
       return { ok: false as const, snapshot: null };
+    } finally {
+      window.clearTimeout(timeout);
+      if (hydrationControllerRef.current === controller) {
+        hydrationControllerRef.current = null;
+      }
+      hydrationInFlightRef.current = false;
     }
   }, [applySnapshot]);
 
   useEffect(() => {
-    const controller = new AbortController();
     const kickoff = window.setTimeout(() => {
-      void hydrateFromApi(controller.signal);
+      void hydrateFromApi();
     }, 0);
     return () => {
       window.clearTimeout(kickoff);
-      controller.abort();
+      hydrationControllerRef.current?.abort();
     };
   }, [hydrateFromApi]);
 
@@ -1175,9 +1368,32 @@ export default function Home() {
   const policy = intelligenceDashboard.policy;
   const approvalItems = intelligenceDashboard.pendingApprovalItems ?? [];
   const pendingApprovalTotal = state.metrics.pendingApprovals;
+  const blockingManualTotal = approvalItems.filter(
+    (item) => item.reviewMode === "blocking_manual",
+  ).length;
   const approvalDecisions =
     intelligenceDashboard.recentApprovalDecisions ?? [];
-  const pipeline = useMemo(() => buildPipeline(state), [state]);
+  const autopilot = intelligenceDashboard.autopilot ?? failClosedAutopilot;
+  const autopilotActive =
+    hasVerifiedSnapshot &&
+    connection === "d1" &&
+    autopilot.enabled &&
+    state.agents.length === 5;
+  const autopilotStatus = !hasVerifiedSnapshot && connection !== "unavailable"
+    ? "VERIFYING"
+    : !autopilotActive
+      ? "DENIED"
+    : autopilot.lastCycle?.outcome === "auto-contained"
+      ? "AUTO-CONTAINED"
+      : autopilot.lastCycle?.outcome === "denied"
+        ? "DENIED"
+        : autopilot.lastCycle?.outcome === "manual_review"
+          ? "SAFE-HOLD"
+          : "OBSERVING";
+  const pipeline = useMemo(
+    () => buildPipeline(state, autopilot),
+    [autopilot, state],
+  );
   const evidence = useMemo(() => {
     const items = state.agents.flatMap((agent) => {
       const assessment = (agent as IntelligenceAgent).assessment;
@@ -1211,35 +1427,41 @@ export default function Home() {
   const proposal =
     councilApproval?.requestedAction ??
     councilAudit?.action ??
+    autopilot.lastCycle?.action ??
     council?.recommendation;
-  const executionLabel = councilApproval
-    ? "PENDING / NOT EXECUTED"
-    : councilDecision?.decision === "reject"
-      ? "REJECTED / NO ACTION"
-      : councilDecision?.decision === "approve_simulation"
-        ? "APPROVED / STATE-ONLY"
-        : council?.recommendation === "deny"
-          ? "DENIED / NO ACTION"
-          : council?.recommendation === "requires_approval"
-            ? "UNRESOLVED / NO ACTION"
-            : council
-              ? "STATE-ONLY LAB"
-              : "STANDBY";
+  const executionLabel = !hasVerifiedSnapshot
+    ? "NOT VERIFIED"
+    : !autopilotActive
+      ? "DENIED / FAIL-CLOSED"
+      : autopilot.lastCycle?.outcome === "auto-contained"
+        ? autopilot.lastCycle.action.toUpperCase()
+        : autopilot.lastCycle?.outcome === "observed"
+          ? "OBSERVE / READ-ONLY"
+          : autopilot.lastCycle?.outcome === "denied"
+            ? "DENIED / NO ACTION"
+            : autopilot.lastCycle?.outcome === "manual_review"
+              ? "SAFE HOLD / NO REQUESTED ACTION"
+              : councilDecision?.decision === "approve_simulation"
+                ? "STATE-ONLY LAB"
+                : "OBSERVE / ARMED";
 
   const statusLabel =
     connection === "unavailable"
-      ? "SECURITY API UNAVAILABLE"
+      ? "AUTOPILOT FAILED CLOSED"
       : connection === "connecting"
-        ? "VERIFYING SECURITY API"
-        : state.status === "protected"
-          ? "VAULT PROTECTED"
-          : state.status === "attention"
-            ? "EVENT UNDER REVIEW"
-            : "PROPOSAL BLOCKED";
+        ? "VERIFYING GUARDED AUTOPILOT"
+        : autopilotStatus === "AUTO-CONTAINED"
+          ? "THREAT AUTO-CONTAINED"
+          : autopilotStatus === "DENIED"
+            ? "UNSAFE ACTION DENIED"
+            : autopilotStatus === "SAFE-HOLD"
+              ? "SAFE HOLD ACTIVE"
+              : "AUTOPILOT ARMED";
 
   return (
     <main
-      className={`command-center status-${state.status} connection-${connection}`}
+      className={`command-center status-${state.status} connection-${connection} autopilot-${autopilotStatus.toLowerCase()}`}
+      aria-busy={!hasVerifiedSnapshot || connection === "connecting"}
     >
       <div className="ambient-grid" aria-hidden="true" />
 
@@ -1264,23 +1486,82 @@ export default function Home() {
           type="button"
           onClick={() => setIsLive((value) => !value)}
           aria-pressed={isLive}
+          aria-label={`${isLive ? "Sospendi" : "Riprendi"} soltanto l'aggiornamento visivo della dashboard; l'autopilot resta operativo`}
         >
           <span aria-hidden="true" />
           {isLive
             ? connection === "unavailable"
               ? "RETRYING"
-              : "LIVE LAB"
-            : "PAUSED"}
+              : "AUTO REFRESH"
+            : "VIEW PAUSED"}
         </button>
       </header>
 
       <section className="demo-notice" aria-label="Avviso modalità dimostrativa">
-        <span>SIMULATION MODE</span>
+        <span>SIMULATION MODE · STATE-ONLY LAB</span>
         <p>
-          Motore deterministico policy-bound · slot consultivo hybrid-ready ·
-          dati pubblici sanitizzati
+          5 moduli deterministici · consensus policy-bound · dati pubblici
+          sanitizzati
         </p>
-        <strong>NO OFFENSIVE OR EXTERNAL ACTIONS</strong>
+        <strong>NO OFFENSIVE OR EXTERNAL ACTIONS · NO NETWORK EXECUTION</strong>
+      </section>
+
+      <section
+        className="autopilot-banner glass-panel"
+        aria-labelledby="autopilot-title"
+      >
+        <div className="autopilot-identity">
+          <span className="autopilot-pulse" aria-hidden="true" />
+          <div>
+            <span>GUARDED AUTONOMY / V0.4</span>
+            <h2 id="autopilot-title">AUTOPILOT 24/7 · LAB PROTOTYPE</h2>
+            <p>
+              Quando riceve un evento di laboratorio, decide senza attendere un
+              operatore. Il collegamento ai sensori live è la fase successiva.
+            </p>
+          </div>
+        </div>
+
+        <dl className="autopilot-facts">
+          <div>
+            <dt>RUNTIME</dt>
+            <dd>EVENT-DRIVEN LAB</dd>
+          </div>
+          <div>
+            <dt>COUNCIL</dt>
+            <dd>{hasVerifiedSnapshot ? `${state.agents.length}/5 AGENTI` : "VERIFYING"}</dd>
+          </div>
+          <div>
+            <dt>BOUNDARY</dt>
+            <dd>POLICY-BOUND</dd>
+          </div>
+          <div>
+            <dt>HUMAN ROLE</dt>
+            <dd>
+              {blockingManualTotal > 0
+                ? "RESTORE APPROVAL ONLY"
+                : "POST-ACTION REVIEW"}
+            </dd>
+          </div>
+        </dl>
+
+        <div
+          className={`autopilot-outcome outcome-${autopilotStatus.toLowerCase()}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span>CURRENT STATE</span>
+          <strong>{autopilotStatus}</strong>
+          <small>
+            {autopilotActive
+                ? autopilot.lastCycle
+                  ? `ULTIMA AZIONE · ${executionLabel}`
+                : "ARMED · IN ATTESA DI EVENTI LAB"
+              : hasVerifiedSnapshot
+                ? "SAFE DENY · LIMITI NON VERIFICATI"
+                : "SNAPSHOT IN VERIFICA"}
+          </small>
+        </div>
       </section>
 
       <section className="operations-grid">
@@ -1304,7 +1585,7 @@ export default function Home() {
                   ? "API della telemetria non disponibile"
                   : connection === "connecting"
                     ? "Verifica della telemetria in corso"
-                    : "Telemetria sintetica attiva"
+                    : "Ingresso eventi sintetici verificato"
               }
             />
           </div>
@@ -1361,7 +1642,7 @@ export default function Home() {
             </div>
             <div>
               <dt>Dashboard refresh</dt>
-              <dd>{isLive ? "6 sec" : "PAUSED"}</dd>
+              <dd>{isLive ? "6 sec" : "VIEW PAUSED"}</dd>
             </div>
           </dl>
         </aside>
@@ -1420,14 +1701,16 @@ export default function Home() {
             <h2 id="vault-title">{statusLabel}</h2>
             <p>
               {connection === "unavailable"
-                ? "The security API failed closed. This is the last known snapshot; no new event or decision was applied."
+                ? "La console pubblica non è verificabile: il motore nega ogni nuova azione e conserva l'ultimo snapshot noto."
                 : connection === "connecting"
-                  ? "Verifying the security API before accepting any new state."
-                  : state.status === "protected"
-                    ? "All defensive modules are synchronized. No confirmed breach."
-                    : state.status === "attention"
-                      ? "A synthetic event is being assessed. Proposals remain inside the policy boundary."
-                      : "A high-impact proposal is blocked until an operator records a decision."}
+                  ? "Verifica dei limiti e della memoria privata prima di mostrare uno stato operativo."
+                  : autopilotStatus === "AUTO-CONTAINED"
+                    ? "Il consiglio 5/5 ha applicato un contenimento state-only reversibile. La traccia è disponibile per la revisione successiva."
+                    : autopilotStatus === "DENIED"
+                      ? "Il Policy Guard ha negato l'azione non conforme. I vincoli restano pronti per il prossimo evento di laboratorio."
+                      : autopilotStatus === "SAFE-HOLD"
+                        ? "Il Policy Guard mantiene il laboratorio in safe hold. Le decisioni allowlisted restano autonome quando arrivano nuovi eventi; nessuna azione richiesta è stata eseguita."
+                        : "Autopilot armato: quando l'API riceve un evento lab autenticato, decide senza attendere un operatore."}
             </p>
           </div>
 
@@ -1474,7 +1757,7 @@ export default function Home() {
                 {connection === "connecting"
                   ? "CONNECTING"
                   : state.metrics.pendingApprovals > 0
-                    ? `${state.metrics.pendingApprovals} APPROVAL PENDING`
+                    ? `${state.metrics.pendingApprovals} POST-REVIEW OPEN`
                     : connection === "memory_fallback"
                       ? "NOT PERSISTED"
                       : connection === "unavailable"
@@ -1488,19 +1771,19 @@ export default function Home() {
         <section className="metrics-grid" aria-label="Metriche principali">
           <MetricCard
             eyebrow="LAB SECURITY EVENTS"
-            value={state.metrics.detected.toLocaleString("en-US")}
+            value={hasVerifiedSnapshot ? state.metrics.detected.toLocaleString("en-US") : "—"}
             note="sanitized synthetic events"
           />
           <MetricCard
-            eyebrow="ALLOWED SIMULATIONS"
-            value={state.metrics.mitigated.toLocaleString("en-US")}
-            note="policy-approved state updates"
+            eyebrow="AUTHORIZED LAB CYCLES"
+            value={hasVerifiedSnapshot ? state.metrics.mitigated.toLocaleString("en-US") : "—"}
+            note="state-only policy decisions"
             tone="violet"
           />
           <MetricCard
-            eyebrow="REVIEW QUEUE"
-            value={String(state.metrics.pendingApprovals)}
-            note="human approvals pending"
+            eyebrow="POST-ACTION REVIEW"
+            value={hasVerifiedSnapshot ? String(state.metrics.pendingApprovals) : "—"}
+            note="non-blocking review records"
             tone={state.metrics.pendingApprovals > 0 ? "amber" : "green"}
           />
           <MetricCard
@@ -1536,7 +1819,7 @@ export default function Home() {
         <aside className="agents-panel glass-panel">
           <div className="panel-heading">
             <div>
-              <span>02 / AGENT INTELLIGENCE</span>
+              <span>02 / DETERMINISTIC AGENTS</span>
               <h2>AGENT COUNCIL</h2>
             </div>
             <span className="agent-count">
@@ -1551,16 +1834,20 @@ export default function Home() {
 
           <div className="agent-list">
             {state.agents.map((agent) => (
-              <AgentRow key={agent.id} agent={agent} />
+              <AgentRow
+                key={agent.id}
+                agent={agent}
+                verified={hasVerifiedSnapshot}
+              />
             ))}
           </div>
 
           <div className="guardrail-card">
             <span>EXECUTION BOUNDARY</span>
-            <strong>Agents propose. Policy and humans decide.</strong>
+            <strong>Agents assess. Policy authorizes or denies.</strong>
             <p>
-              Deterministic policy engine · hybrid-ready advisory slot · no
-              autonomous network execution.
+              Guarded autonomy state-only · reversible allowlist · human review
+              after the event, without pausing protection.
             </p>
           </div>
         </aside>
@@ -1572,11 +1859,12 @@ export default function Home() {
       >
         <div className="panel-heading command-deck-heading">
           <div>
-            <span>03 / AGENT INTELLIGENCE</span>
+            <span>03 / GUARDED AUTOPILOT</span>
             <h2 id="command-deck-title">COMMAND DECK</h2>
           </div>
           <div className="engine-badges" aria-label="Modalità del motore">
             <span>POLICY-BOUND</span>
+            <span>EVENT-DRIVEN LAB</span>
             <span>HYBRID-READY</span>
             <span>STATE-ONLY</span>
           </div>
@@ -1778,6 +2066,20 @@ export default function Home() {
                     : "BLOCKED"}
                 </dd>
               </div>
+              <div>
+                <dt>Network execution</dt>
+                <dd className="blocked-value">
+                  {autopilot.hardLimits.networkExecution ? "VIOLATION" : "BLOCKED"}
+                </dd>
+              </div>
+              <div>
+                <dt>Restore snapshot</dt>
+                <dd className="review-value">
+                  {policy?.humanApprovalForRestore === false
+                    ? "POLICY VIOLATION"
+                    : "MANUAL ONLY"}
+                </dd>
+              </div>
             </dl>
           </aside>
         </div>
@@ -1806,22 +2108,24 @@ export default function Home() {
         >
           <div className="approval-console-heading">
             <div>
-              <span>HUMAN APPROVAL QUEUE</span>
+              <span>POST-ACTION REVIEW · NON-BLOCKING</span>
               <h3 id="approval-title">
                 {pendingApprovalTotal > 0
-                  ? `${pendingApprovalTotal} DECISION${pendingApprovalTotal > 1 ? "S" : ""} REQUIRED${pendingApprovalTotal > approvalItems.length ? ` · VISIBILI ${approvalItems.length} DI ${pendingApprovalTotal}` : ""}`
-                  : "QUEUE CLEAR"}
+                  ? `${pendingApprovalTotal} REVIEW OPEN · AUTOPILOT ACTIVE${blockingManualTotal > 0 ? ` · ${blockingManualTotal} MANUAL EXCEPTION` : ""}${pendingApprovalTotal > approvalItems.length ? ` · VISIBILI ${approvalItems.length}` : ""}`
+                  : "REVIEW LOG CLEAR · AUTOPILOT ACTIVE"}
               </h3>
             </div>
             <p>
-              Approva soltanto una variazione di stato nel laboratorio. Nessun
-              comando di rete, contrattacco o azione offensiva viene eseguito.
+              La protezione continua in autonomia. Qui puoi rivedere gli esiti
+              in seguito; soltanto il ripristino snapshot resta un&apos;eccezione
+              manuale separata, sempre state-only.
             </p>
           </div>
 
           {approvalItems.length > 0 ? (
             <div className="approval-list">
               {approvalItems.map((item) => {
+                const isBlockingManual = item.reviewMode === "blocking_manual";
                 const pendingOperation = approvalOperations[item.id];
                 const approvingThisItem =
                   approvalBusy?.approvalId === item.id &&
@@ -1834,12 +2138,13 @@ export default function Home() {
                   <article className="approval-item" key={item.id}>
                     <div className="approval-item-copy">
                       <span>
+                        {isBlockingManual ? "MANUAL EXCEPTION" : "POST-EVENT"} ·{" "}
                         {item.severity?.toUpperCase()} · {item.scenarioId}
                       </span>
                       <strong>{item.title}</strong>
                       <p>{item.explanation}</p>
                       <small>
-                        PROPOSAL: {item.requestedAction} · POLICY{" "}
+                        SAFE HOLD: {item.requestedAction} · POLICY{" "}
                         {item.policyVersion}
                       </small>
                     </div>
@@ -1857,13 +2162,15 @@ export default function Home() {
                           (pendingOperation !== undefined &&
                             pendingOperation.decision !== "approve_simulation")
                         }
-                        aria-label={`Approva soltanto la simulazione ${item.title}`}
+                        aria-label={`${isBlockingManual ? "Autorizza l'eccezione manuale" : "Conferma la revisione post-evento"} ${item.title}`}
                       >
                         {approvingThisItem
-                          ? "RECORDING APPROVAL…"
+                          ? "RECORDING…"
                           : pendingOperation?.decision === "approve_simulation"
-                            ? "RETRY APPROVE"
-                            : "APPROVA LAB"}
+                            ? "RETRY REVIEW"
+                            : isBlockingManual
+                              ? "AUTORIZZA RESTORE LAB"
+                              : "CONFERMA REVIEW"}
                       </button>
                       <button
                         type="button"
@@ -1876,13 +2183,15 @@ export default function Home() {
                           (pendingOperation !== undefined &&
                             pendingOperation.decision !== "reject")
                         }
-                        aria-label={`Rifiuta la proposta ${item.title}`}
+                        aria-label={`${isBlockingManual ? "Nega l'eccezione manuale" : "Archivia con rifiuto la revisione"} ${item.title}`}
                       >
                         {rejectingThisItem
-                          ? "RECORDING REJECTION…"
+                          ? "RECORDING…"
                           : pendingOperation?.decision === "reject"
                             ? "RETRY REJECT"
-                            : "RIFIUTA"}
+                            : isBlockingManual
+                              ? "NEGA ECCEZIONE"
+                              : "ARCHIVIA / RIFIUTA"}
                       </button>
                     </div>
                   </article>
@@ -1893,8 +2202,11 @@ export default function Home() {
             <div className="approval-empty">
               <span aria-hidden="true">✓</span>
               <div>
-                <strong>Nessuna proposta ad alto impatto in attesa</strong>
-                <p>Il Policy Guard intercetterà automaticamente ogni nuova richiesta.</p>
+                <strong>Nessuna revisione aperta</strong>
+                <p>
+                  L&apos;autopilot event-driven applica automaticamente allowlist,
+                  quorum e Policy Guard.
+                </p>
               </div>
             </div>
           )}
@@ -1908,12 +2220,13 @@ export default function Home() {
       <section className="operator-overview glass-panel" aria-labelledby="operator-title">
         <div className="panel-heading operator-heading">
           <div>
-            <span>04 / OPERATOR PLAYBOOK</span>
-            <h2 id="operator-title">COME LAVORANO I 5 SUPER AGENTI</h2>
+            <span>04 / AUTONOMY PLAYBOOK</span>
+            <h2 id="operator-title">COME DECIDONO SENZA ATTESA</h2>
           </div>
           <p>
-            Ogni agente ha un compito separato. Le proposte ad alto impatto si
-            fermano davanti al Policy Guard e attendono un operatore umano.
+            Cinque moduli deterministici separano rilevazione, contenimento,
+            identità, deviazione e recupero. Il Policy Guard può soltanto
+            restringere l&apos;azione; la revisione umana avviene dopo l&apos;evento.
           </p>
         </div>
 
@@ -1949,7 +2262,7 @@ export default function Home() {
                   ? "LAST KNOWN EVENT TIMELINE"
                   : connection === "connecting"
                     ? "VERIFYING EVENT TIMELINE"
-                    : "LIVE EVENT TIMELINE"}
+                    : "VERIFIED EVENT TIMELINE"}
               </h2>
             </div>
             <span className="feed-state">
@@ -1968,19 +2281,31 @@ export default function Home() {
             aria-live="polite"
             aria-relevant="additions"
           >
-            {state.timeline.map((event) => (
-              <article key={event.id} className={`event event-${event.severity}`}>
-                <time>{event.time}</time>
-                <span className="event-pip" aria-hidden="true" />
-                <div>
-                  <strong>{event.title}</strong>
-                  <p>{event.detail}</p>
+            {hasVerifiedSnapshot ? (
+              state.timeline.length > 0 ? (
+                state.timeline.map((event) => (
+                  <article key={event.id} className={`event event-${event.severity}`}>
+                    <time>{event.time}</time>
+                    <span className="event-pip" aria-hidden="true" />
+                    <div>
+                      <strong>{event.title}</strong>
+                      <p>{event.detail}</p>
+                    </div>
+                    <span className="severity-pill">
+                      {severityLabels[event.severity]}
+                    </span>
+                  </article>
+                ))
+              ) : (
+                <div className="verified-empty-state">
+                  Nessun evento sanitizzato nello snapshot verificato.
                 </div>
-                <span className="severity-pill">
-                  {severityLabels[event.severity]}
-                </span>
-              </article>
-            ))}
+              )
+            ) : (
+              <div className="verified-empty-state" role="status">
+                Verifica dello stream pubblico in corso…
+              </div>
+            )}
           </div>
         </section>
 
@@ -1993,23 +2318,31 @@ export default function Home() {
             <span className="feed-state">DEMO</span>
           </div>
 
-          <ol className="leaderboard-list">
-            {state.researchers.map((researcher, index) => (
-              <li key={researcher.alias}>
-                <span className="rank">{String(index + 1).padStart(2, "0")}</span>
-                <span className="researcher-avatar" aria-hidden="true">
-                  {researcher.alias.slice(0, 2).toUpperCase()}
-                </span>
-                <div>
-                  <strong>{researcher.alias}</strong>
-                  <small>{researcher.country} · VERIFIED</small>
-                </div>
-                <span className="finding-count">
-                  {researcher.findings} <small>FINDINGS</small>
-                </span>
-              </li>
-            ))}
-          </ol>
+          {hasVerifiedSnapshot && state.researchers.length > 0 ? (
+            <ol className="leaderboard-list">
+              {state.researchers.map((researcher, index) => (
+                <li key={researcher.alias}>
+                  <span className="rank">{String(index + 1).padStart(2, "0")}</span>
+                  <span className="researcher-avatar" aria-hidden="true">
+                    {researcher.alias.slice(0, 2).toUpperCase()}
+                  </span>
+                  <div>
+                    <strong>{researcher.alias}</strong>
+                    <small>{researcher.country} · VERIFIED</small>
+                  </div>
+                  <span className="finding-count">
+                    {researcher.findings} <small>FINDINGS</small>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <div className="verified-empty-state" role="status">
+              {hasVerifiedSnapshot
+                ? "Nessun ricercatore nello snapshot verificato."
+                : "Verifica della classifica pubblica in corso…"}
+            </div>
+          )}
         </section>
       </section>
 
@@ -2019,7 +2352,7 @@ export default function Home() {
           <span>•</span> NO SECRETS
         </p>
         <p>
-          KRELUNA DEFENSE ENGINE · POLICY-BOUND / HYBRID-READY · SAFE LAB v0.3
+          KRELUNA DEFENSE ENGINE · GUARDED AUTOPILOT / POLICY-BOUND · SAFE LAB v0.4
         </p>
       </footer>
     </main>

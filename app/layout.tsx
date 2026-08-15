@@ -27,12 +27,12 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     title: "Kreluna Cyber · The Vault Challenge",
     description:
-      "A policy-bound five-agent defensive laboratory for an isolated challenge server.",
+      "An event-driven guarded-autopilot prototype with five deterministic agents for an isolated, state-only laboratory.",
     metadataBase: new URL(origin),
     openGraph: {
       title: "Kreluna Cyber · The Vault Challenge",
       description:
-        "Five specialist agents. Explainable consensus. Human-controlled decisions.",
+        "Five deterministic agents. Event-driven containment. Policy-enforced boundaries.",
       type: "website",
       images: [
         {
@@ -47,7 +47,7 @@ export async function generateMetadata(): Promise<Metadata> {
       card: "summary_large_image",
       title: "Kreluna Cyber · The Vault Challenge",
       description:
-        "Five specialist agents. Explainable consensus. Human-controlled decisions.",
+        "Five deterministic agents. Event-driven containment. Policy-enforced boundaries.",
       images: [`${origin}/og.png`],
     },
   };

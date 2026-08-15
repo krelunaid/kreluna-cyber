@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createInitialDemoState,
+  runGuardedLabEvent,
   runNamedLabScenario,
 } from "../lib/creluna/defense-engine.ts";
 import { InMemorySecurityStore } from "../lib/creluna/security-store.ts";
@@ -24,8 +25,10 @@ test("fallback store retains sanitized lab state and ignores duplicate event IDs
   const snapshot = await store.readSanitizedSnapshot();
 
   assert.equal(snapshot.metrics.detected, 1);
-  assert.equal(snapshot.metrics.pendingApprovals, 1);
-  assert.equal(snapshot.status, "review");
+  assert.equal(snapshot.metrics.pendingApprovals, 0);
+  assert.equal(snapshot.status, "protected");
+  assert.equal(snapshot.autopilot.lastCycle?.outcome, "auto-contained");
+  assert.equal(snapshot.autopilot.availability, "event_driven");
   assert.equal(snapshot.timeline[0].id, "store-event-1");
   assert.equal(JSON.stringify(snapshot).includes("payload"), false);
 });
@@ -47,14 +50,22 @@ test("fallback reads return defensive copies", async () => {
 
 test("fallback approval decision is atomic, one-shot and state-only", async () => {
   const store = new InMemorySecurityStore();
-  const cycle = runNamedLabScenario(
+  const cycle = runGuardedLabEvent(
     createInitialDemoState(),
-    "api-input-anomaly",
     {
-      eventId: "approval-store-event",
-      now: "2026-08-15T12:00:00.000Z",
-      sequence: 1,
+      id: "approval-store-event",
+      scenarioId: "recovery-check",
+      title: "Manual recovery proposal",
+      detail: "State-only restore remains operator-controlled",
+      severity: "high",
+      confidence: 1,
+      independentSignals: 4,
+      demoAsset: "vault-web-01",
+      requestedAction: "restore_demo_snapshot",
+      labOnly: true,
+      occurredAt: "2026-08-15T12:00:00.000Z",
     },
+    1,
   );
   await store.appendCycle(cycle);
   const approvalId = cycle.snapshot.pendingApprovalItems[0].id;

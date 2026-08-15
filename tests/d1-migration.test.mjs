@@ -7,6 +7,10 @@ import { drizzle } from "drizzle-orm/sqlite-proxy";
 
 import * as schema from "../db/schema.ts";
 import { D1SecurityStore } from "../lib/creluna/d1-security-store.ts";
+import {
+  createInitialDemoState,
+  runNamedLabScenario,
+} from "../lib/creluna/defense-engine.ts";
 
 const migration0 = readFileSync(
   new URL("../drizzle/0000_new_whirlwind.sql", import.meta.url),
@@ -56,6 +60,53 @@ function insertEvent(sqlite, {
       9300, 3, 'vault-api-01', 'quarantine_demo_asset', ?, 1, ?, ?)
   `).run(id, sequence, title, decision, occurredAt, occurredAt);
 }
+
+test("D1 append guard rejects unsafe execution flags and autonomous approval dependencies", async () => {
+  const store = new D1SecurityStore({});
+  const safe = runNamedLabScenario(
+    createInitialDemoState(),
+    "api-input-anomaly",
+    {
+      eventId: "append-guard",
+      now: "2026-08-15T12:00:00.000Z",
+      sequence: 1,
+    },
+  );
+
+  await assert.rejects(
+    store.appendCycle({
+      ...safe,
+      execution: { ...safe.execution, externalNetworkAction: true },
+    }),
+    /execution is forbidden/i,
+  );
+  await assert.rejects(
+    store.appendCycle({
+      ...safe,
+      decision: {
+        outcome: "requires_approval",
+        explanation: "Fabricated blocking hold",
+        reasonCode: "COUNCIL_HUMAN_APPROVAL_REQUIRED",
+        approvalRequired: true,
+      },
+    }),
+    /decision cannot weaken|cannot create a new blocking approval/i,
+  );
+  await assert.rejects(
+    store.appendCycle({
+      ...safe,
+      event: { ...safe.event, labOnly: false },
+    }),
+    /council summary must match|decision cannot weaken/i,
+  );
+  await assert.rejects(
+    store.appendCycle({
+      ...safe,
+      assessments: [...safe.assessments.slice(0, 4), safe.assessments[0]],
+    }),
+    /schema or trust validation/i,
+  );
+});
 
 test("D1 migration backfills legacy approvals and rejects invalid enum state", () => {
   const sqlite = openMigratedDatabase((legacy) => {
@@ -216,6 +267,49 @@ test("D1 snapshot scopes agent cards to the deterministic latest council and ser
     assert.equal(snapshot.pendingApprovalItems.length, 50);
     assert.equal(snapshot.pendingApprovalItems[0].id, "pending-00:approval");
     assert.equal(snapshot.pendingApprovalItems.at(-1)?.id, "pending-49:approval");
+    assert.ok(snapshot.pendingApprovalItems.every(({ reviewMode }) => reviewMode === "post_event"));
+    assert.equal(snapshot.status, "protected");
+    assert.equal(snapshot.autopilot.enabled, true);
+    assert.equal(snapshot.autopilot.mode, "guarded_autopilot");
+    assert.equal(snapshot.autopilot.availability, "event_driven");
+    assert.equal(snapshot.autopilot.postReviewOnly, true);
+    assert.equal(snapshot.autopilot.lastCycle?.outcome, "manual_review");
+    assert.deepEqual(snapshot.autopilot.allowlist, [
+      "observe",
+      "rate_limit_demo_session",
+      "route_to_internal_decoy",
+      "quarantine_demo_asset",
+    ]);
+
+    insertEvent(sqlite, {
+      id: "pending-restore-outside-public-window",
+      sequence: 100,
+      occurredAt: "2026-08-17T12:00:00.000Z",
+      title: "Manual restore outside bounded FIFO window",
+    });
+    sqlite.exec(`
+      UPDATE security_events
+      SET requested_action = 'restore_demo_snapshot'
+      WHERE id = 'pending-restore-outside-public-window';
+      INSERT INTO approval_requests (
+        id, event_id, scenario_id, title, severity, requested_action, status,
+        policy_version, council_recommendation, explanation, created_at, decided_at
+      ) VALUES (
+        'pending-restore-outside-public-window:approval',
+        'pending-restore-outside-public-window', 'recovery-check',
+        'Manual restore outside bounded FIFO window', 'high',
+        'restore_demo_snapshot', 'pending', '4.0.0', 'requires_approval',
+        'Manual restore requires an explicit operator decision.',
+        '2026-08-17T12:00:00.000Z', NULL
+      );
+    `);
+    const snapshotWithHiddenRestore = await store.readSanitizedSnapshot();
+    assert.equal(snapshotWithHiddenRestore.pendingApprovalItems.length, 50);
+    assert.ok(snapshotWithHiddenRestore.pendingApprovalItems.every(
+      ({ requestedAction }) => requestedAction !== "restore_demo_snapshot",
+    ));
+    assert.equal(snapshotWithHiddenRestore.status, "review");
+    assert.equal(snapshotWithHiddenRestore.autopilot.postReviewOnly, false);
     assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
   } finally {
     sqlite.close();

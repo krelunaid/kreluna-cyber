@@ -24,6 +24,21 @@ export type SafeAction =
   | "quarantine_demo_asset"
   | "restore_demo_snapshot";
 
+export const GUARDED_AUTOPILOT_ALLOWLIST = [
+  "observe",
+  "rate_limit_demo_session",
+  "route_to_internal_decoy",
+  "quarantine_demo_asset",
+] as const satisfies readonly SafeAction[];
+
+export type GuardedAutopilotAction =
+  (typeof GUARDED_AUTOPILOT_ALLOWLIST)[number];
+export type AutopilotCycleOutcome =
+  | "auto-contained"
+  | "observed"
+  | "denied"
+  | "manual_review";
+
 export type AuthorizedDemoAsset =
   | "vault-web-01"
   | "vault-api-01"
@@ -39,16 +54,18 @@ export interface PolicyProfile {
   externalNetworkActions: boolean;
   offensiveActions: boolean;
   humanApprovalForHighImpact: boolean;
+  humanApprovalForRestore: boolean;
 }
 
 export const POLICY_PROFILE: Readonly<PolicyProfile> = Object.freeze({
   id: "creluna-policy-guard",
-  version: "3.0.0",
-  fingerprint: "CPG-STATE-ONLY-5A-2026",
-  mode: "deterministic_policy_bound",
+  version: "4.0.0",
+  fingerprint: "CPG-GUARDED-AUTOPILOT-5A-2026",
+  mode: "guarded_autopilot",
   externalNetworkActions: false as const,
   offensiveActions: false as const,
-  humanApprovalForHighImpact: true as const,
+  humanApprovalForHighImpact: false as const,
+  humanApprovalForRestore: true as const,
 });
 
 export interface SyntheticSecurityEvent {
@@ -74,6 +91,8 @@ export interface PolicyDecision {
     | "HUMAN_APPROVAL_REQUIRED"
     | "COUNCIL_HUMAN_APPROVAL_REQUIRED"
     | "COUNCIL_DENY_RECORDED"
+    | "COUNCIL_SAFETY_HOLD_RECORDED"
+    | "COUNCIL_CONFIDENCE_GATE_FAILED"
     | "HUMAN_APPROVAL_RECORDED"
     | "HUMAN_REJECTION_RECORDED"
     | "OUTSIDE_LAB_BOUNDARY"
@@ -181,6 +200,33 @@ export interface PendingApprovalItem {
   createdAt: string;
   councilRecommendation: PolicyOutcome;
   explanation: string;
+  reviewMode: "post_event" | "blocking_manual";
+}
+
+export interface AutopilotLastCycle {
+  outcome: AutopilotCycleOutcome;
+  cycleId: string;
+  scenario: SafeScenarioId;
+  action: SafeAction;
+  decidedAt: string;
+}
+
+export interface AutopilotState {
+  enabled: true;
+  mode: "guarded_autopilot";
+  availability: "event_driven";
+  lastCycle: AutopilotLastCycle | null;
+  allowlist: GuardedAutopilotAction[];
+  hardLimits: {
+    stateOnly: true;
+    labOnly: true;
+    reversibleOnly: true;
+    externalActions: false;
+    offensiveActions: false;
+    privilegedActions: false;
+    networkExecution: false;
+  };
+  postReviewOnly: boolean;
 }
 
 export type ApprovalDecision = "approve_simulation" | "reject";
@@ -205,6 +251,7 @@ export interface DashboardState {
     criticalBreaches: number;
   };
   policy: Readonly<PolicyProfile>;
+  autopilot: AutopilotState;
   council: CouncilSummary | null;
   agents: AgentState[];
   pendingApprovalItems: PendingApprovalItem[];
@@ -303,21 +350,13 @@ const AUTHORIZED_DEMO_ASSETS: ReadonlySet<string> = new Set([
   "identity-lab-01",
 ]);
 
-const ALLOWLISTED_ACTIONS: ReadonlySet<string> = new Set<SafeAction>([
-  "observe",
-  "tag_demo_session",
-  "notify_operator",
-  "rate_limit_demo_session",
-  "route_to_internal_decoy",
-  "quarantine_demo_asset",
+const AUTOPILOT_ACTIONS: ReadonlySet<string> = new Set(
+  GUARDED_AUTOPILOT_ALLOWLIST,
+);
+const MANUAL_ONLY_ACTIONS: ReadonlySet<string> = new Set<SafeAction>([
   "restore_demo_snapshot",
 ]);
-
-const HIGH_IMPACT_ACTIONS: ReadonlySet<SafeAction> = new Set([
-  "route_to_internal_decoy",
-  "quarantine_demo_asset",
-  "restore_demo_snapshot",
-]);
+const MIN_AUTOPILOT_COUNCIL_CONFIDENCE = 85;
 
 const SCENARIOS: Readonly<Record<SafeScenarioId, ScenarioDefinition>> = {
   "authentication-burst": {
@@ -336,7 +375,7 @@ const SCENARIOS: Readonly<Record<SafeScenarioId, ScenarioDefinition>> = {
     scenarioId: "api-input-anomaly",
     label: "API input anomaly",
     title: "Abnormal API input isolated",
-    detail: "Sanitized signature retained; internal decoy proposal held for approval",
+    detail: "Sanitized signature retained; internal decoy state routed autonomously inside the lab",
     severity: "high",
     confidence: 0.94,
     independentSignals: 2,
@@ -347,8 +386,8 @@ const SCENARIOS: Readonly<Record<SafeScenarioId, ScenarioDefinition>> = {
   "integrity-drift": {
     scenarioId: "integrity-drift",
     label: "Integrity drift",
-    title: "Integrity signal requires review",
-    detail: "Quarantine remains a proposal until an authorized human reviews it",
+    title: "Integrity drift contained",
+    detail: "The reversible demo asset quarantine was recorded autonomously inside the lab",
     severity: "high",
     confidence: 0.97,
     independentSignals: 3,
@@ -403,7 +442,7 @@ export const AGENT_DEFINITIONS: readonly AgentDefinition[] = [
     name: "DECOY",
     role: "Internal lab deception",
     level: 98,
-    mission: "Assess isolated decoy proposals while preserving strict human control.",
+    mission: "Assess isolated decoy actions under strict policy and reversible lab-only limits.",
     capabilities: ["internal decoy planning", "isolation validation", "proposal-only routing"],
     baselineTrust: 98,
   },
@@ -501,7 +540,7 @@ export function listSafeLabScenarios(): SafeScenarioSummary[] {
     id,
     label: SCENARIOS[id].label,
     severity: SCENARIOS[id].severity,
-    requiresApproval: HIGH_IMPACT_ACTIONS.has(SCENARIOS[id].requestedAction),
+    requiresApproval: MANUAL_ONLY_ACTIONS.has(SCENARIOS[id].requestedAction),
   }));
 }
 
@@ -515,7 +554,10 @@ export function evaluateDemoAction(event: Readonly<SyntheticSecurityEvent>): Pol
     };
   }
 
-  if (!ALLOWLISTED_ACTIONS.has(event.requestedAction)) {
+  if (
+    !AUTOPILOT_ACTIONS.has(event.requestedAction) &&
+    !MANUAL_ONLY_ACTIONS.has(event.requestedAction)
+  ) {
     return {
       outcome: "deny",
       explanation: "Policy Guard rejected an action that is not on the lab allowlist.",
@@ -539,27 +581,42 @@ export function evaluateDemoAction(event: Readonly<SyntheticSecurityEvent>): Pol
     };
   }
 
-  if (HIGH_IMPACT_ACTIONS.has(event.requestedAction)) {
+  if (MANUAL_ONLY_ACTIONS.has(event.requestedAction)) {
     return {
       outcome: "requires_approval",
-      explanation: "Policy Guard recorded the proposal; a human must authorize the state-only simulation.",
+      explanation: "Snapshot restoration is manual-only; Policy Guard recorded the proposal without executing it.",
       reasonCode: "HUMAN_APPROVAL_REQUIRED",
       approvalRequired: true,
     };
   }
 
-  if (event.requestedAction === "rate_limit_demo_session") {
-    if (event.confidence >= 0.85 && event.independentSignals >= 2) {
+  if (event.requestedAction !== "observe") {
+    const minimumConfidence = event.requestedAction === "rate_limit_demo_session"
+      ? 0.85
+      : 0.9;
+    if (
+      event.confidence >= minimumConfidence &&
+      event.independentSignals >= 2
+    ) {
       return {
         outcome: "allow_simulation",
-        explanation: "Policy Guard allowed a scoped, reversible state-only simulation.",
+        explanation: "Policy Guard allowed autonomous, reversible, state-only containment inside the lab.",
         reasonCode: "SCOPED_REVERSIBLE_SIMULATION",
         approvalRequired: false,
       };
     }
     return {
       outcome: "deny",
-      explanation: "The evidence threshold for the rate-limit simulation was not met.",
+      explanation: "The evidence threshold for guarded autonomous containment was not met.",
+      reasonCode: "INVALID_EVIDENCE",
+      approvalRequired: false,
+    };
+  }
+
+  if (event.confidence < 0.85) {
+    return {
+      outcome: "deny",
+      explanation: "The evidence confidence floor for autonomous observation was not met.",
       reasonCode: "INVALID_EVIDENCE",
       approvalRequired: false,
     };
@@ -567,7 +624,7 @@ export function evaluateDemoAction(event: Readonly<SyntheticSecurityEvent>): Pol
 
   return {
     outcome: "allow_simulation",
-    explanation: "Policy Guard allowed a low-impact observational lab update.",
+    explanation: "Policy Guard allowed an autonomous, read-only laboratory observation.",
     reasonCode: "LAB_OBSERVATION_ALLOWED",
     approvalRequired: false,
   };
@@ -624,10 +681,10 @@ function specializedReport(
     },
     decoy: {
       rationale: event.requestedAction === "route_to_internal_decoy"
-        ? "Internal decoy routing is a proposal only and remains blocked pending human authorization."
+        ? "Internal decoy routing is eligible for guarded autonomous state-only containment."
         : "No decoy route is required; deception controls stay inactive.",
-      evidence: [`Decoy requirement ${event.requestedAction === "route_to_internal_decoy" ? "proposed" : "none"}`, "Isolation boundary verified", "External routing absent"],
-      safeguards: ["Internal lab destination only", "Human approval gate", "No interaction with external actors"],
+      evidence: [`Decoy requirement ${event.requestedAction === "route_to_internal_decoy" ? "internal-only" : "none"}`, "Isolation boundary verified", "External routing absent"],
+      safeguards: ["Internal lab destination only", "Reversible state transition", "No interaction with external actors"],
     },
     phoenix: {
       rationale: event.scenarioId === "recovery-check"
@@ -780,7 +837,31 @@ export function buildCouncilSummary(
 function effectiveDecisionFromCouncil(
   policyDecision: Readonly<PolicyDecision>,
   council: Readonly<CouncilSummary>,
+  reports: readonly AgentAssessment[],
 ): PolicyDecision {
+  if (policyDecision.outcome === "deny") return { ...policyDecision };
+
+  if (!council.quorum.met) {
+    return {
+      outcome: "deny",
+      explanation: "The five-agent quorum was not met; Policy Guard denied the cycle fail-closed.",
+      reasonCode: "COUNCIL_DENY_RECORDED",
+      approvalRequired: false,
+    };
+  }
+
+  if (
+    policyDecision.outcome === "allow_simulation" &&
+    reports.some(({ confidence }) => confidence < MIN_AUTOPILOT_COUNCIL_CONFIDENCE)
+  ) {
+    return {
+      outcome: "deny",
+      explanation: `At least one council report fell below the ${MIN_AUTOPILOT_COUNCIL_CONFIDENCE}% autonomous confidence floor; the cycle failed closed.`,
+      reasonCode: "COUNCIL_CONFIDENCE_GATE_FAILED",
+      approvalRequired: false,
+    };
+  }
+
   if (policyRank(council.recommendation) <= policyRank(policyDecision.outcome)) {
     return { ...policyDecision };
   }
@@ -795,10 +876,52 @@ function effectiveDecisionFromCouncil(
   }
 
   return {
-    outcome: "requires_approval",
-    explanation: "The validated council requested human review; the state-only simulation remains blocked.",
-    reasonCode: "COUNCIL_HUMAN_APPROVAL_REQUIRED",
-    approvalRequired: true,
+    outcome: "deny",
+    explanation: "The validated council issued a stricter safety hold; guarded autopilot failed closed without creating an approval dependency.",
+    reasonCode: "COUNCIL_SAFETY_HOLD_RECORDED",
+    approvalRequired: false,
+  };
+}
+
+export function autopilotOutcomeFor(
+  action: SafeAction,
+  decision: PolicyOutcome,
+): AutopilotCycleOutcome {
+  if (decision === "deny") return "denied";
+  if (decision === "requires_approval") return "manual_review";
+  return action === "observe" ? "observed" : "auto-contained";
+}
+
+export function isBlockingManualApproval(
+  item: Pick<PendingApprovalItem, "requestedAction" | "reviewMode">,
+): boolean {
+  return item.reviewMode === "blocking_manual" ||
+    item.requestedAction === "restore_demo_snapshot";
+}
+
+export function createAutopilotState(
+  lastCycle: AutopilotLastCycle | null = null,
+  pendingApprovalItems: readonly PendingApprovalItem[] = [],
+): AutopilotState {
+  return {
+    enabled: true,
+    mode: "guarded_autopilot",
+    availability: "event_driven",
+    lastCycle,
+    allowlist: [...GUARDED_AUTOPILOT_ALLOWLIST],
+    hardLimits: {
+      stateOnly: true,
+      labOnly: true,
+      reversibleOnly: true,
+      externalActions: false,
+      offensiveActions: false,
+      privilegedActions: false,
+      networkExecution: false,
+    },
+    // Allowlisted actions are supervised retrospectively. A manual-only
+    // snapshot restore is outside that allowlist and temporarily makes the
+    // outstanding review queue blocking without disabling other protection.
+    postReviewOnly: !pendingApprovalItems.some(isBlockingManualApproval),
   };
 }
 
@@ -808,6 +931,7 @@ export function createInitialDemoState(): DashboardState {
     status: "protected",
     metrics: { detected: 0, mitigated: 0, pendingApprovals: 0, criticalBreaches: 0 },
     policy: POLICY_PROFILE,
+    autopilot: createAutopilotState(),
     council: null,
     agents: AGENT_DEFINITIONS.map((agent) => ({
       id: agent.id,
@@ -886,7 +1010,8 @@ function createPendingApproval(
     policyVersion: POLICY_PROFILE.version,
     createdAt: event.occurredAt,
     councilRecommendation: council.recommendation,
-    explanation: "This state-only simulation is blocked until one explicit human decision is recorded.",
+    explanation: "Snapshot restoration remains blocked until one explicit human decision is recorded.",
+    reviewMode: "blocking_manual",
   };
 }
 
@@ -903,6 +1028,9 @@ function finalizeDefenseCycle(
   const pendingApprovalItems = approval
     ? [approval, ...previous.pendingApprovalItems]
     : previous.pendingApprovalItems;
+  const hasBlockingManualApproval = pendingApprovalItems.some(
+    isBlockingManualApproval,
+  );
   const audit: AuditEntry = {
     id: `${event.id}:audit:1`,
     eventId: event.id,
@@ -918,9 +1046,9 @@ function finalizeDefenseCycle(
   const snapshot: DashboardState = {
     ...previous,
     revision: Math.max(previous.revision + 1, sequence),
-    status: pendingApprovalItems.length > 0
+    status: hasBlockingManualApproval
       ? "review"
-      : decision.outcome === "deny" || event.severity === "high" ? "attention" : "protected",
+      : decision.outcome === "deny" ? "attention" : "protected",
     metrics: {
       detected: previous.metrics.detected + 1,
       mitigated: previous.metrics.mitigated + (decision.outcome === "allow_simulation" ? 1 : 0),
@@ -928,6 +1056,13 @@ function finalizeDefenseCycle(
       criticalBreaches: previous.metrics.criticalBreaches,
     },
     policy: POLICY_PROFILE,
+    autopilot: createAutopilotState({
+      outcome: autopilotOutcomeFor(event.requestedAction, decision.outcome),
+      cycleId: event.id,
+      scenario: event.scenarioId,
+      action: event.requestedAction,
+      decidedAt: event.occurredAt,
+    }, pendingApprovalItems),
     council,
     agents: previous.agents.map((agent) => {
       const assessment = latestAssessment.get(agent.id);
@@ -961,8 +1096,12 @@ function finalizeDefenseCycle(
       time: safeClockLabel(event.occurredAt),
       title: event.title,
       detail: decision.outcome === "requires_approval"
-        ? `${event.detail} · blocked for human approval`
-        : `${event.detail} · council ${council.consensus}`,
+        ? `${event.detail} · manual restore approval required`
+        : decision.outcome === "deny"
+          ? `${event.detail} · denied fail-closed`
+          : event.requestedAction === "observe"
+            ? `${event.detail} · observed autonomously · council ${council.consensus}`
+            : `${event.detail} · auto-contained in reversible lab state · council ${council.consensus}`,
       severity: event.severity,
     }, ...previous.timeline.filter((item) => item.id !== "lab-ready")].slice(0, 12),
     audit: [...previous.audit, {
@@ -995,19 +1134,49 @@ function createScenarioEvent(scenarioId: SafeScenarioId, context: DefenseCycleCo
   return { ...definition, id: context.eventId, occurredAt: context.now };
 }
 
+/**
+ * Policy-bound event entry point used by trusted lab adapters and tests. The
+ * caller cannot bypass Policy Guard or the validated five-agent council.
+ */
+export function runGuardedLabEvent(
+  previous: DashboardState,
+  event: SyntheticSecurityEvent,
+  sequence: number,
+): DefenseCycleResult {
+  const immutableEvent = Object.freeze({ ...event });
+  const decision = Object.freeze(evaluateDemoAction(immutableEvent));
+  const assessments = deterministicLabAgentCouncil.assess(immutableEvent, decision);
+  if (assessments instanceof Promise) {
+    throw new Error("The deterministic lab council must be synchronous.");
+  }
+  const validated = validateCouncilReports(
+    immutableEvent,
+    assessments,
+    deterministicLabAgentCouncil.provider,
+  );
+  const council = buildCouncilSummary(immutableEvent, decision, validated);
+  const effectiveDecision = effectiveDecisionFromCouncil(
+    decision,
+    council,
+    validated,
+  );
+  return finalizeDefenseCycle(
+    previous,
+    immutableEvent,
+    effectiveDecision,
+    validated,
+    council,
+    sequence,
+  );
+}
+
 export function runNamedLabScenario(
   previous: DashboardState,
   scenarioId: SafeScenarioId,
   context: DefenseCycleContext,
 ): DefenseCycleResult {
   const event = createScenarioEvent(scenarioId, context);
-  const decision = Object.freeze(evaluateDemoAction(event));
-  const assessments = deterministicLabAgentCouncil.assess(Object.freeze(event), decision);
-  if (assessments instanceof Promise) throw new Error("The deterministic lab council must be synchronous.");
-  const validated = validateCouncilReports(event, assessments, deterministicLabAgentCouncil.provider);
-  const council = buildCouncilSummary(event, decision, validated);
-  const effectiveDecision = effectiveDecisionFromCouncil(decision, council);
-  return finalizeDefenseCycle(previous, event, effectiveDecision, validated, council, context.sequence);
+  return runGuardedLabEvent(previous, event, context.sequence);
 }
 
 export async function runNamedLabScenarioWithCouncil(
@@ -1017,12 +1186,26 @@ export async function runNamedLabScenarioWithCouncil(
   councilProvider: AgentCouncil,
 ): Promise<DefenseCycleResult> {
   const event = createScenarioEvent(scenarioId, context);
+  return runGuardedLabEventWithCouncil(
+    previous,
+    event,
+    context.sequence,
+    councilProvider,
+  );
+}
+
+export async function runGuardedLabEventWithCouncil(
+  previous: DashboardState,
+  event: SyntheticSecurityEvent,
+  sequence: number,
+  councilProvider: AgentCouncil,
+): Promise<DefenseCycleResult> {
   const decision = Object.freeze(evaluateDemoAction(event));
   const reports = await councilProvider.assess(Object.freeze(event), decision);
   const validated = validateCouncilReports(event, reports, councilProvider.provider);
   const council = buildCouncilSummary(event, decision, validated);
-  const effectiveDecision = effectiveDecisionFromCouncil(decision, council);
-  return finalizeDefenseCycle(previous, event, effectiveDecision, validated, council, context.sequence);
+  const effectiveDecision = effectiveDecisionFromCouncil(decision, council, validated);
+  return finalizeDefenseCycle(previous, event, effectiveDecision, validated, council, sequence);
 }
 
 export function resolveApprovalInState(
@@ -1061,17 +1244,19 @@ export function resolveApprovalInState(
     createdAt: now,
   };
   const remaining = previous.pendingApprovalItems.filter((item) => item.id !== approvalId);
+  const hasBlockingManualApproval = remaining.some(isBlockingManualApproval);
   const resolutionSeverity: Severity = decision === "approve_simulation" ? "low" : "info";
   const snapshot: DashboardState = {
     ...previous,
     revision: previous.revision + 1,
-    status: remaining.length > 0 ? "review" : "protected",
+    status: hasBlockingManualApproval ? "review" : "protected",
     metrics: {
       ...previous.metrics,
       mitigated: previous.metrics.mitigated + (decision === "approve_simulation" ? 1 : 0),
       pendingApprovals: remaining.length,
     },
     agents: previous.agents.map((agent) => ({ ...agent, status: "ready" as const })),
+    autopilot: createAutopilotState(previous.autopilot.lastCycle, remaining),
     pendingApprovalItems: remaining,
     recentApprovalDecisions: [record, ...previous.recentApprovalDecisions].slice(0, 20),
     timeline: [{

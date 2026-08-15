@@ -9,6 +9,8 @@ import {
   parseApprovalRequest,
   resolveApprovalInState,
   runDemoDefenseCycle,
+  runGuardedLabEvent,
+  runGuardedLabEventWithCouncil,
   runNamedLabScenario,
   runNamedLabScenarioWithCouncil,
   SAFE_SCENARIO_IDS,
@@ -41,6 +43,7 @@ test("publishes exactly four named, safe laboratory scenarios", () => {
     [...SAFE_SCENARIO_IDS],
   );
   assert.equal(new Set(SAFE_SCENARIO_IDS).size, 4);
+  assert.ok(listSafeLabScenarios().every(({ requiresApproval }) => !requiresApproval));
 });
 
 test("API parser accepts only the exact {scenario} envelope", () => {
@@ -61,27 +64,45 @@ test("API parser accepts only the exact {scenario} envelope", () => {
   }
 });
 
-test("allows only an evidenced, scoped demo rate-limit simulation", () => {
-  assert.equal(evaluateDemoAction(baseEvent).outcome, "allow_simulation");
-  assert.equal(
-    evaluateDemoAction({ ...baseEvent, confidence: 0.5 }).outcome,
-    "deny",
-  );
-  assert.equal(
-    evaluateDemoAction({ ...baseEvent, independentSignals: 1 }).outcome,
-    "deny",
-  );
-});
-
-test("requires human approval for every high-impact lab action", () => {
+test("allows only the four evidenced, reversible guarded-autopilot actions", () => {
   for (const requestedAction of [
+    "observe",
+    "rate_limit_demo_session",
     "route_to_internal_decoy",
     "quarantine_demo_asset",
-    "restore_demo_snapshot",
   ]) {
+    const decision = evaluateDemoAction({
+      ...baseEvent,
+      confidence: 0.97,
+      independentSignals: 3,
+      requestedAction,
+    });
+    assert.equal(decision.outcome, "allow_simulation");
+    assert.equal(decision.approvalRequired, false);
+  }
+
+  assert.equal(evaluateDemoAction({ ...baseEvent, confidence: 0.5 }).outcome, "deny");
+  assert.equal(evaluateDemoAction({ ...baseEvent, independentSignals: 1 }).outcome, "deny");
+  assert.equal(evaluateDemoAction({ ...baseEvent, confidence: Number.NaN }).reasonCode, "INVALID_EVIDENCE");
+  assert.equal(evaluateDemoAction({
+    ...baseEvent,
+    requestedAction: "observe",
+    confidence: 0.84,
+  }).outcome, "deny");
+});
+
+test("keeps restore manual-only and rejects every non-autopilot action", () => {
+  const restore = evaluateDemoAction({
+    ...baseEvent,
+    requestedAction: "restore_demo_snapshot",
+  });
+  assert.equal(restore.outcome, "requires_approval");
+  assert.equal(restore.approvalRequired, true);
+
+  for (const requestedAction of ["tag_demo_session", "notify_operator", "counterattack"]) {
     const decision = evaluateDemoAction({ ...baseEvent, requestedAction });
-    assert.equal(decision.outcome, "requires_approval");
-    assert.equal(decision.approvalRequired, true);
+    assert.equal(decision.outcome, "deny");
+    assert.equal(decision.reasonCode, "ACTION_NOT_ALLOWLISTED");
   }
 });
 
@@ -104,29 +125,64 @@ test("rejects non-lab assets, non-lab events and non-allowlisted actions", () =>
   );
 });
 
-test("named pipeline is deterministic, immutable and state-only", () => {
+test("all four named scenarios autonomously protect in event-driven, state-only mode", () => {
   const initial = createInitialDemoState();
   const untouched = structuredClone(initial);
-  const first = runNamedLabScenario(
-    initial,
-    "authentication-burst",
-    context,
-  );
-  const second = runNamedLabScenario(
-    initial,
-    "authentication-burst",
-    context,
-  );
+  const expectedOutcomes = [
+    "auto-contained",
+    "auto-contained",
+    "auto-contained",
+    "observed",
+  ];
 
-  assert.deepEqual(first, second);
+  for (const [index, scenarioId] of SAFE_SCENARIO_IDS.entries()) {
+    const scenarioContext = {
+      ...context,
+      eventId: `cycle-${index + 1}`,
+      sequence: index + 1,
+    };
+    const first = runNamedLabScenario(initial, scenarioId, scenarioContext);
+    const second = runNamedLabScenario(initial, scenarioId, scenarioContext);
+    assert.deepEqual(first, second);
+    assert.equal(first.decision.outcome, "allow_simulation");
+    assert.equal(first.approval, null);
+    assert.equal(first.snapshot.pendingApprovalItems.length, 0);
+    assert.equal(first.snapshot.metrics.pendingApprovals, 0);
+    assert.equal(first.snapshot.status, "protected");
+    assert.equal(first.snapshot.autopilot.enabled, true);
+    assert.equal(first.snapshot.autopilot.mode, "guarded_autopilot");
+    assert.equal(first.snapshot.autopilot.availability, "event_driven");
+    assert.equal(first.snapshot.autopilot.lastCycle?.outcome, expectedOutcomes[index]);
+    assert.equal(first.snapshot.autopilot.postReviewOnly, true);
+    assert.equal(first.council.quorum.required, 5);
+    assert.equal(first.council.quorum.received, 5);
+    assert.equal(first.council.quorum.met, true);
+    assert.equal(first.execution.externalNetworkAction, false);
+    assert.equal(first.execution.offensiveAction, false);
+    assert.equal(first.execution.privilegedAction, false);
+    assert.equal(first.assessments.length, 5);
+    assert.ok(first.assessments.every(({ provider }) => provider === "deterministic_lab"));
+  }
+
   assert.deepEqual(initial, untouched);
-  assert.equal(first.execution.externalNetworkAction, false);
-  assert.equal(first.execution.offensiveAction, false);
-  assert.equal(first.assessments.length, 5);
-  assert.ok(first.assessments.every(({ provider }) => provider === "deterministic_lab"));
+  assert.deepEqual(initial.autopilot.allowlist, [
+    "observe",
+    "rate_limit_demo_session",
+    "route_to_internal_decoy",
+    "quarantine_demo_asset",
+  ]);
+  assert.deepEqual(initial.autopilot.hardLimits, {
+    stateOnly: true,
+    labOnly: true,
+    reversibleOnly: true,
+    externalActions: false,
+    offensiveActions: false,
+    privilegedActions: false,
+    networkExecution: false,
+  });
 });
 
-test("a model-style council cannot weaken Policy Guard", async () => {
+test("a model-style council cannot weaken a Policy Guard deny", async () => {
   const advisoryCouncil = {
     provider: "advisory_model",
     async assess(event) {
@@ -150,17 +206,23 @@ test("a model-style council cannot weaken Policy Guard", async () => {
       );
     },
   };
-  const result = await runNamedLabScenarioWithCouncil(
+  const deniedEvent = {
+    ...baseEvent,
+    id: "policy-deny-event",
+    requestedAction: "counterattack",
+  };
+  const result = await runGuardedLabEventWithCouncil(
     createInitialDemoState(),
-    "integrity-drift",
-    context,
+    deniedEvent,
+    1,
     advisoryCouncil,
   );
 
-  assert.equal(result.decision.outcome, "requires_approval");
-  assert.equal(result.council.recommendation, "requires_approval");
+  assert.equal(result.decision.outcome, "deny");
+  assert.equal(result.council.recommendation, "deny");
   assert.equal(result.council.consensus, "policy_veto");
-  assert.equal(result.incident.status, "pending_approval");
+  assert.equal(result.incident.status, "denied");
+  assert.equal(result.approval, null);
   assert.equal(result.execution.externalNetworkAction, false);
 });
 
@@ -203,7 +265,7 @@ test("a stricter advisory denial becomes the effective fail-closed decision", as
   assert.equal(result.execution.privilegedAction, false);
 });
 
-test("a stricter advisory hold creates a state-only human approval gate", async () => {
+test("a stricter advisory hold fails closed without creating an autonomous approval", async () => {
   const baseline = runNamedLabScenario(
     createInitialDemoState(),
     "recovery-check",
@@ -230,21 +292,56 @@ test("a stricter advisory hold creates a state-only human approval gate", async 
   );
 
   assert.equal(result.council.recommendation, "requires_approval");
-  assert.equal(result.decision.outcome, "requires_approval");
+  assert.equal(result.decision.outcome, "deny");
   assert.equal(
     result.decision.reasonCode,
-    "COUNCIL_HUMAN_APPROVAL_REQUIRED",
+    "COUNCIL_SAFETY_HOLD_RECORDED",
   );
-  assert.equal(result.incident.status, "pending_approval");
-  assert.equal(result.snapshot.status, "review");
+  assert.equal(result.incident.status, "denied");
+  assert.equal(result.snapshot.status, "attention");
   assert.equal(result.snapshot.metrics.mitigated, 0);
-  assert.equal(result.snapshot.metrics.pendingApprovals, 1);
-  assert.equal(result.audit.outcome, "requires_approval");
-  assert.equal(result.approval?.status, "pending");
+  assert.equal(result.snapshot.metrics.pendingApprovals, 0);
+  assert.equal(result.snapshot.autopilot.lastCycle?.outcome, "denied");
+  assert.equal(result.audit.outcome, "deny");
+  assert.equal(result.approval, null);
   assert.equal(result.execution.scope, "state_only_lab_simulation");
   assert.equal(result.execution.externalNetworkAction, false);
   assert.equal(result.execution.offensiveAction, false);
   assert.equal(result.execution.privilegedAction, false);
+});
+
+test("autopilot confidence floor fails closed even when all advisory votes allow", async () => {
+  const baseline = runNamedLabScenario(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+  );
+  const lowConfidenceCouncil = {
+    provider: "advisory_model",
+    async assess() {
+      return baseline.assessments.map((report, index) => ({
+        ...report,
+        provider: "advisory_model",
+        vote: "allow_simulation",
+        confidence: index === 0 ? 84 : 100,
+        rationale: "Schema-valid advisory report with insufficient autonomous confidence.",
+      }));
+    },
+  };
+
+  const result = await runNamedLabScenarioWithCouncil(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+    lowConfidenceCouncil,
+  );
+
+  assert.equal(result.council.recommendation, "allow_simulation");
+  assert.equal(result.decision.outcome, "deny");
+  assert.equal(result.decision.reasonCode, "COUNCIL_CONFIDENCE_GATE_FAILED");
+  assert.equal(result.approval, null);
+  assert.equal(result.snapshot.metrics.pendingApprovals, 0);
+  assert.equal(result.snapshot.autopilot.lastCycle?.outcome, "denied");
 });
 
 test("publishes five specialized level-98+ agents and a validated 5-of-5 council", () => {
@@ -301,11 +398,21 @@ test("approval parser is exact and resolution is one-shot state-only", () => {
   assert.equal(parseApprovalRequest({ ...valid, target: "external" }).ok, false);
   assert.equal(parseApprovalRequest({ ...valid, confirmation: "YES" }).ok, false);
 
-  const pending = runNamedLabScenario(
+  const pendingCycle = runGuardedLabEvent(
     createInitialDemoState(),
-    "integrity-drift",
-    { ...context, eventId: "event-approval" },
-  ).snapshot;
+    {
+      ...baseEvent,
+      id: "event-approval",
+      requestedAction: "restore_demo_snapshot",
+    },
+    1,
+  );
+  const pending = pendingCycle.snapshot;
+  assert.equal(pendingCycle.decision.outcome, "requires_approval");
+  assert.equal(pendingCycle.approval?.reviewMode, "blocking_manual");
+  assert.equal(pending.autopilot.lastCycle?.outcome, "manual_review");
+  assert.equal(pending.autopilot.postReviewOnly, false);
+  assert.equal(pending.status, "review");
   const approvalId = pending.pendingApprovalItems[0].id;
   const resolved = resolveApprovalInState(
     pending,
@@ -315,6 +422,7 @@ test("approval parser is exact and resolution is one-shot state-only", () => {
   );
   assert.equal(resolved.snapshot.metrics.pendingApprovals, 0);
   assert.equal(resolved.snapshot.metrics.mitigated, 1);
+  assert.equal(resolved.snapshot.autopilot.postReviewOnly, true);
   assert.equal(resolved.execution.externalNetworkAction, false);
   assert.equal(resolved.execution.offensiveAction, false);
   assert.equal(resolved.execution.privilegedAction, false);
@@ -334,16 +442,24 @@ test("records every simulated policy decision in the audit trail", () => {
   assert.equal(next.revision, 1);
 });
 
-test("keeps the vault in review while an earlier approval is still pending", () => {
-  const pending = runNamedLabScenario(
-    createInitialDemoState(),
-    "api-input-anomaly",
-    {
-      eventId: "pending-approval",
-      now: "2026-08-15T12:00:00.000Z",
-      sequence: 1,
-    },
-  ).snapshot;
+test("legacy non-restore pending is post-review and never makes protection look blocked", () => {
+  const pending = createInitialDemoState();
+  pending.status = "review";
+  pending.metrics.pendingApprovals = 1;
+  pending.pendingApprovalItems = [{
+    id: "pending-approval:approval",
+    eventId: "pending-approval",
+    scenarioId: "api-input-anomaly",
+    title: "Legacy API review",
+    severity: "high",
+    requestedAction: "route_to_internal_decoy",
+    status: "pending",
+    policyVersion: "3.0.0",
+    createdAt: "2026-08-15T12:00:00.000Z",
+    councilRecommendation: "requires_approval",
+    explanation: "Legacy review retained.",
+    reviewMode: "post_event",
+  }];
 
   const afterRecoveryCheck = runNamedLabScenario(
     pending,
@@ -356,5 +472,7 @@ test("keeps the vault in review while an earlier approval is still pending", () 
   ).snapshot;
 
   assert.equal(afterRecoveryCheck.metrics.pendingApprovals, 1);
-  assert.equal(afterRecoveryCheck.status, "review");
+  assert.equal(afterRecoveryCheck.pendingApprovalItems[0].reviewMode, "post_event");
+  assert.equal(afterRecoveryCheck.autopilot.postReviewOnly, true);
+  assert.equal(afterRecoveryCheck.status, "protected");
 });
