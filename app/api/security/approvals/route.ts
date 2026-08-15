@@ -1,10 +1,7 @@
 import {
-  listSafeLabScenarios,
-  parseLabScenarioRequest,
-  runNamedLabScenario,
-  SAFE_SCENARIO_IDS,
+  parseApprovalRequest,
   type DashboardState,
-} from "../../../lib/creluna/defense-engine";
+} from "../../../../lib/creluna/defense-engine";
 import {
   createIdempotencyRecord,
   parseIdempotencyKey,
@@ -12,23 +9,24 @@ import {
   requireSameOrigin,
   SECURITY_RESPONSE_HEADERS,
   securityError,
-} from "../../../lib/creluna/api-guards";
+} from "../../../../lib/creluna/api-guards";
 import {
+  ApprovalAlreadyResolvedError,
+  ApprovalNotFoundError,
   IdempotencyConflictError,
   type SecurityStore,
-} from "../../../lib/creluna/security-store";
+} from "../../../../lib/creluna/security-store";
 import {
   resolveSecurityStore,
   type PersistenceMode,
-} from "../../../lib/creluna/store-runtime";
-import { requireAuthenticatedOperator } from "./operator-auth";
+} from "../../../../lib/creluna/store-runtime";
+import { requireAuthenticatedOperator } from "../operator-auth";
 
 function successEnvelope(snapshot: DashboardState, persistence: PersistenceMode) {
   return {
     ok: true as const,
     mode: "safe_lab" as const,
     persistence,
-    allowedScenarios: listSafeLabScenarios(),
     snapshot,
   };
 }
@@ -44,13 +42,12 @@ function persistenceFailure() {
 async function replayResponse(
   store: SecurityStore,
   persistence: PersistenceMode,
-  scenario: string,
+  approvalId: string,
 ) {
-  const snapshot = await store.readSanitizedSnapshot();
   return Response.json(
     {
-      ...successEnvelope(snapshot, persistence),
-      scenario,
+      ...successEnvelope(await store.readSanitizedSnapshot(), persistence),
+      approvalId,
       replayed: true,
       execution: {
         scope: "state_only_lab_simulation",
@@ -63,19 +60,6 @@ async function replayResponse(
   );
 }
 
-export async function GET() {
-  let resolved: ReturnType<typeof resolveSecurityStore>;
-  try {
-    resolved = resolveSecurityStore();
-    const snapshot = await resolved.store.readSanitizedSnapshot();
-    return Response.json(successEnvelope(snapshot, resolved.persistence), {
-      headers: SECURITY_RESPONSE_HEADERS,
-    });
-  } catch {
-    return persistenceFailure();
-  }
-}
-
 export async function POST(request: Request) {
   const originFailure = requireSameOrigin(request);
   if (originFailure) return originFailure;
@@ -86,34 +70,26 @@ export async function POST(request: Request) {
   if (!keyResult.ok) return keyResult.response;
   const body = await readSmallJsonBody(request);
   if (!body.ok) return body.response;
-  const parsed = parseLabScenarioRequest(body.payload);
-  if (!parsed.ok) {
-    return securityError(400, parsed.code, parsed.message, {
-      allowedScenarioIds: [...SAFE_SCENARIO_IDS],
-    });
-  }
+  const parsed = parseApprovalRequest(body.payload);
+  if (!parsed.ok) return securityError(400, parsed.code, parsed.message);
 
   let resolved: ReturnType<typeof resolveSecurityStore>;
-  let snapshot: DashboardState;
   try {
     resolved = resolveSecurityStore();
     if (resolved.persistence !== "d1") return persistenceFailure();
-    snapshot = await resolved.store.readSanitizedSnapshot();
+    await resolved.store.readSanitizedSnapshot();
   } catch {
     return persistenceFailure();
   }
 
   const now = new Date().toISOString();
-  const provisionalResourceId = crypto.randomUUID();
-  const provisionalReplay = await createIdempotencyRecord(
+  const replay = await createIdempotencyRecord(
     keyResult.key,
-    "scenario",
+    "approval",
     body.rawBody,
-    provisionalResourceId,
+    parsed.approvalId,
     now,
   );
-  const eventId = `event:${provisionalReplay.id.slice("scenario:".length, "scenario:".length + 48)}`;
-  const replay = { ...provisionalReplay, resourceId: eventId };
 
   try {
     if (replay) {
@@ -122,27 +98,25 @@ export async function POST(request: Request) {
         if (existing.requestHash !== replay.requestHash) {
           return securityError(409, "IDEMPOTENCY_CONFLICT", "This key was already used for a different request.");
         }
-        return await replayResponse(resolved.store, resolved.persistence, parsed.scenario);
+        return await replayResponse(resolved.store, resolved.persistence, parsed.approvalId);
       }
     }
 
-    const result = runNamedLabScenario(snapshot, parsed.scenario, {
-      eventId,
+    const result = await resolved.store.resolveApproval(
+      parsed.approvalId,
+      parsed.decision,
       now,
-      sequence: snapshot.revision + 1,
-    });
-    await resolved.store.appendCycle(result, replay);
-    const persistedSnapshot = await resolved.store.readSanitizedSnapshot();
+      replay,
+    );
     return Response.json(
       {
-        ...successEnvelope(persistedSnapshot, resolved.persistence),
-        scenario: parsed.scenario,
-        decision: result.decision,
-        council: result.council,
+        ...successEnvelope(result.snapshot, resolved.persistence),
+        approvalId: parsed.approvalId,
+        resolution: result.record,
         execution: result.execution,
         replayed: false,
       },
-      { status: 201, headers: SECURITY_RESPONSE_HEADERS },
+      { status: 200, headers: SECURITY_RESPONSE_HEADERS },
     );
   } catch (error) {
     if (error instanceof IdempotencyConflictError) {
@@ -152,17 +126,23 @@ export async function POST(request: Request) {
       try {
         const existing = await resolved.store.findReplay(replay.id);
         if (existing?.requestHash === replay.requestHash) {
-          return await replayResponse(resolved.store, resolved.persistence, parsed.scenario);
+          return await replayResponse(resolved.store, resolved.persistence, parsed.approvalId);
         }
         if (existing) {
           return securityError(409, "IDEMPOTENCY_CONFLICT", "This key was already used for a different request.");
         }
       } catch {
-        // The durable store is unavailable; the response below remains fail-closed.
+        return persistenceFailure();
       }
+    }
+    if (error instanceof ApprovalNotFoundError) {
+      return securityError(404, "APPROVAL_NOT_FOUND", "The approval request does not exist or is not pending.");
+    }
+    if (error instanceof ApprovalAlreadyResolvedError) {
+      return securityError(409, "APPROVAL_ALREADY_RESOLVED", "This approval has already received its one allowed decision.");
     }
     return resolved.persistence === "d1"
       ? persistenceFailure()
-      : securityError(500, "SAFE_LAB_OPERATION_FAILED", "The state-only simulation was not recorded.");
+      : securityError(500, "APPROVAL_FAILED", "The decision was not recorded and no action was executed.");
   }
 }

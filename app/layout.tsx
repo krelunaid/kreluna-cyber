@@ -27,12 +27,12 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     title: "Creluna Cyber · The Vault Challenge",
     description:
-      "The live defensive command center protecting an isolated challenge server.",
+      "A policy-bound five-agent defensive laboratory for an isolated challenge server.",
     metadataBase: new URL(origin),
     openGraph: {
       title: "Creluna Cyber · The Vault Challenge",
       description:
-        "Five defensive agents. One isolated vault. Every decision audited.",
+        "Five specialist agents. Explainable consensus. Human-controlled decisions.",
       type: "website",
       images: [
         {
@@ -47,7 +47,7 @@ export async function generateMetadata(): Promise<Metadata> {
       card: "summary_large_image",
       title: "Creluna Cyber · The Vault Challenge",
       description:
-        "Five defensive agents. One isolated vault. Every decision audited.",
+        "Five specialist agents. Explainable consensus. Human-controlled decisions.",
       images: [`${origin}/og.png`],
     },
   };

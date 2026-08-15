@@ -6,10 +6,13 @@ import {
   evaluateDemoAction,
   listSafeLabScenarios,
   parseLabScenarioRequest,
+  parseApprovalRequest,
+  resolveApprovalInState,
   runDemoDefenseCycle,
   runNamedLabScenario,
   runNamedLabScenarioWithCouncil,
   SAFE_SCENARIO_IDS,
+  validateCouncilReports,
 } from "../lib/creluna/defense-engine.ts";
 
 const baseEvent = {
@@ -123,7 +126,7 @@ test("named pipeline is deterministic, immutable and state-only", () => {
   assert.ok(first.assessments.every(({ provider }) => provider === "deterministic_lab"));
 });
 
-test("a model-style council cannot override Policy Guard", async () => {
+test("a model-style council cannot weaken Policy Guard", async () => {
   const advisoryCouncil = {
     provider: "advisory_model",
     async assess(event) {
@@ -135,8 +138,14 @@ test("a model-style council cannot override Policy Guard", async () => {
           agentName: agentId.toUpperCase(),
           provider: "advisory_model",
           verdict: "clear",
+          vote: "allow_simulation",
+          risk: "low",
+          confidence: 100,
+          trust: 100,
           score: 1,
           rationale: "Advisory output only",
+          evidence: ["Validated synthetic evidence"],
+          safeguards: ["Advisory only; no execution"],
         }),
       );
     },
@@ -149,8 +158,170 @@ test("a model-style council cannot override Policy Guard", async () => {
   );
 
   assert.equal(result.decision.outcome, "requires_approval");
+  assert.equal(result.council.recommendation, "requires_approval");
+  assert.equal(result.council.consensus, "policy_veto");
   assert.equal(result.incident.status, "pending_approval");
   assert.equal(result.execution.externalNetworkAction, false);
+});
+
+test("a stricter advisory denial becomes the effective fail-closed decision", async () => {
+  const baseline = runNamedLabScenario(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+  );
+  const denyCouncil = {
+    provider: "advisory_model",
+    async assess() {
+      return baseline.assessments.map((report) => ({
+        ...report,
+        provider: "advisory_model",
+        verdict: "monitor",
+        vote: "deny",
+        rationale: "Validated advisory denial for the state-only laboratory cycle.",
+      }));
+    },
+  };
+
+  const result = await runNamedLabScenarioWithCouncil(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+    denyCouncil,
+  );
+
+  assert.equal(result.council.recommendation, "deny");
+  assert.equal(result.decision.outcome, "deny");
+  assert.equal(result.decision.reasonCode, "COUNCIL_DENY_RECORDED");
+  assert.equal(result.incident.status, "denied");
+  assert.equal(result.snapshot.status, "attention");
+  assert.equal(result.snapshot.metrics.mitigated, 0);
+  assert.equal(result.audit.outcome, "deny");
+  assert.equal(result.approval, null);
+  assert.equal(result.execution.externalNetworkAction, false);
+  assert.equal(result.execution.offensiveAction, false);
+  assert.equal(result.execution.privilegedAction, false);
+});
+
+test("a stricter advisory hold creates a state-only human approval gate", async () => {
+  const baseline = runNamedLabScenario(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+  );
+  const holdCouncil = {
+    provider: "advisory_model",
+    async assess() {
+      return baseline.assessments.map((report) => ({
+        ...report,
+        provider: "advisory_model",
+        verdict: "hold_for_human",
+        vote: "requires_approval",
+        rationale: "Validated advisory hold for explicit human review.",
+      }));
+    },
+  };
+
+  const result = await runNamedLabScenarioWithCouncil(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+    holdCouncil,
+  );
+
+  assert.equal(result.council.recommendation, "requires_approval");
+  assert.equal(result.decision.outcome, "requires_approval");
+  assert.equal(
+    result.decision.reasonCode,
+    "COUNCIL_HUMAN_APPROVAL_REQUIRED",
+  );
+  assert.equal(result.incident.status, "pending_approval");
+  assert.equal(result.snapshot.status, "review");
+  assert.equal(result.snapshot.metrics.mitigated, 0);
+  assert.equal(result.snapshot.metrics.pendingApprovals, 1);
+  assert.equal(result.audit.outcome, "requires_approval");
+  assert.equal(result.approval?.status, "pending");
+  assert.equal(result.execution.scope, "state_only_lab_simulation");
+  assert.equal(result.execution.externalNetworkAction, false);
+  assert.equal(result.execution.offensiveAction, false);
+  assert.equal(result.execution.privilegedAction, false);
+});
+
+test("publishes five specialized level-98+ agents and a validated 5-of-5 council", () => {
+  const result = runNamedLabScenario(
+    createInitialDemoState(),
+    "authentication-burst",
+    context,
+  );
+
+  assert.equal(result.council.quorum.required, 5);
+  assert.equal(result.council.quorum.received, 5);
+  assert.equal(result.council.quorum.met, true);
+  assert.equal(new Set(result.assessments.map(({ agentId }) => agentId)).size, 5);
+  assert.ok(result.snapshot.agents.every(({ level }) => level >= 98));
+  assert.ok(result.snapshot.agents.every(({ mission, capabilities }) => mission.length > 20 && capabilities.length >= 3));
+  assert.ok(result.snapshot.agents.every(({ assessment }) => assessment?.evidence.length >= 1));
+});
+
+test("rejects duplicate, missing or malformed council reports", () => {
+  const result = runNamedLabScenario(
+    createInitialDemoState(),
+    "recovery-check",
+    context,
+  );
+  assert.throws(
+    () => validateCouncilReports(result.event, result.assessments.slice(0, 4)),
+    /exactly five reports/,
+  );
+  const duplicate = [...result.assessments.slice(0, 4), result.assessments[0]];
+  assert.throws(
+    () => validateCouncilReports(result.event, duplicate),
+    /schema or trust validation/,
+  );
+  const malformed = result.assessments.map((report, index) =>
+    index === 0 ? { ...report, evidence: [123] } : report,
+  );
+  assert.throws(
+    () => validateCouncilReports(result.event, malformed),
+    /schema or trust validation/,
+  );
+});
+
+test("approval parser is exact and resolution is one-shot state-only", () => {
+  const valid = {
+    approvalId: "event-approval:approval",
+    decision: "approve_simulation",
+    confirmation: "STATE_ONLY_LAB",
+  };
+  assert.deepEqual(parseApprovalRequest(valid), {
+    ok: true,
+    approvalId: valid.approvalId,
+    decision: valid.decision,
+  });
+  assert.equal(parseApprovalRequest({ ...valid, target: "external" }).ok, false);
+  assert.equal(parseApprovalRequest({ ...valid, confirmation: "YES" }).ok, false);
+
+  const pending = runNamedLabScenario(
+    createInitialDemoState(),
+    "integrity-drift",
+    { ...context, eventId: "event-approval" },
+  ).snapshot;
+  const approvalId = pending.pendingApprovalItems[0].id;
+  const resolved = resolveApprovalInState(
+    pending,
+    approvalId,
+    "approve_simulation",
+    "2026-08-15T12:01:00.000Z",
+  );
+  assert.equal(resolved.snapshot.metrics.pendingApprovals, 0);
+  assert.equal(resolved.snapshot.metrics.mitigated, 1);
+  assert.equal(resolved.execution.externalNetworkAction, false);
+  assert.equal(resolved.execution.offensiveAction, false);
+  assert.equal(resolved.execution.privilegedAction, false);
+  assert.throws(
+    () => resolveApprovalInState(resolved.snapshot, approvalId, "reject", "2026-08-15T12:02:00.000Z"),
+    /APPROVAL_NOT_PENDING/,
+  );
 });
 
 test("records every simulated policy decision in the audit trail", () => {
