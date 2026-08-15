@@ -509,7 +509,7 @@ export function evaluateDemoAction(event: Readonly<SyntheticSecurityEvent>): Pol
   if (event.labOnly !== true || !AUTHORIZED_DEMO_ASSETS.has(event.demoAsset)) {
     return {
       outcome: "deny",
-      explanation: "The target is outside the authorized Creluna laboratory boundary.",
+      explanation: "The target is outside the authorized Krelunaa laboratory boundary.",
       reasonCode: "OUTSIDE_LAB_BOUNDARY",
       approvalRequired: false,
     };
@@ -826,7 +826,7 @@ export function createInitialDemoState(): DashboardState {
     timeline: [{
       id: "lab-ready",
       time: "READY",
-      title: "Creluna safe laboratory online",
+      title: "Krelunaa safe laboratory online",
       detail: "Five-agent council · policy veto · no external or offensive actions",
       severity: "info",
     }],

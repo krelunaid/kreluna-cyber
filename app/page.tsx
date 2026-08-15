@@ -1246,10 +1246,10 @@ export default function Home() {
       <header className="command-header">
         <div className="brand-lockup">
           <span className="brand-glyph" aria-hidden="true">
-            C
+            K
           </span>
           <div>
-            <p>CRELUNA CYBER</p>
+            <p>KRELUNAA CYBER</p>
             <h1>THE VAULT CHALLENGE</h1>
           </div>
         </div>
@@ -1330,7 +1330,7 @@ export default function Home() {
               />
             ))}
             <div className="radar-center" aria-hidden="true">
-              <span>C</span>
+              <span>K</span>
             </div>
           </div>
 
@@ -1396,7 +1396,7 @@ export default function Home() {
                 <div className="vault-door">
                   <div className="vault-door-groove" aria-hidden="true" />
                   <div className="vault-plaque">
-                    <small>CRELUNA SECURE CORE</small>
+                    <small>KRELUNAA SECURE CORE</small>
                     <strong>THE VAULT</strong>
                     <span>ISOLATED CHALLENGE SERVER</span>
                   </div>
@@ -2019,7 +2019,7 @@ export default function Home() {
           <span>•</span> NO SECRETS
         </p>
         <p>
-          CRELUNA DEFENSE ENGINE · POLICY-BOUND / HYBRID-READY · SAFE LAB v0.3
+          KRELUNAA DEFENSE ENGINE · POLICY-BOUND / HYBRID-READY · SAFE LAB v0.3
         </p>
       </footer>
     </main>

@@ -1,6 +1,6 @@
-# Creluna Cyber · The Vault Challenge
+# Krelunaa Cyber · The Vault Challenge
 
-Creluna Cyber is a defensive-security laboratory built around an isolated
+Krelunaa Cyber is a defensive-security laboratory built around an isolated
 challenge server called **THE VAULT** (`TV-01`). The public command center shows
 only sanitized laboratory security data. It never receives raw payloads, secrets,
 or direct access to defensive controls.

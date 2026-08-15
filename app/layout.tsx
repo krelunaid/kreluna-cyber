@@ -25,12 +25,12 @@ export async function generateMetadata(): Promise<Metadata> {
   const origin = `${protocol}://${host}`;
 
   return {
-    title: "Creluna Cyber · The Vault Challenge",
+    title: "Krelunaa Cyber · The Vault Challenge",
     description:
       "A policy-bound five-agent defensive laboratory for an isolated challenge server.",
     metadataBase: new URL(origin),
     openGraph: {
-      title: "Creluna Cyber · The Vault Challenge",
+      title: "Krelunaa Cyber · The Vault Challenge",
       description:
         "Five specialist agents. Explainable consensus. Human-controlled decisions.",
       type: "website",
@@ -39,13 +39,13 @@ export async function generateMetadata(): Promise<Metadata> {
           url: `${origin}/og.png`,
           width: 1672,
           height: 941,
-          alt: "Creluna Cyber — The Vault Challenge",
+          alt: "Krelunaa Cyber — The Vault Challenge",
         },
       ],
     },
     twitter: {
       card: "summary_large_image",
-      title: "Creluna Cyber · The Vault Challenge",
+      title: "Krelunaa Cyber · The Vault Challenge",
       description:
         "Five specialist agents. Explainable consensus. Human-controlled decisions.",
       images: [`${origin}/og.png`],
